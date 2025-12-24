@@ -120,11 +120,13 @@ impl eframe::App for App {
 
                     ui.separator();
 
-                    const TABS: [FlightViewTab; 8] = [
+                    const TABS: [FlightViewTab; 10] = [
+                        FlightViewTab::Dashboard,
                         FlightViewTab::Plot,
                         FlightViewTab::Tune,
                         FlightViewTab::Vibe,
                         FlightViewTab::Stats,
+                        FlightViewTab::Anomalies,
                         FlightViewTab::Error,
                         FlightViewTab::Setup,
                         FlightViewTab::Suggestions,
@@ -232,7 +234,21 @@ impl eframe::App for App {
                 ui.set_enabled(enabled);
 
                 if let Some((_, Some(view))) = self.flights_data_views.get_mut(self.selected) {
-                    view.show(ui, self.flight_view_tab);
+                    // Check for navigation actions (e.g., from Anomalies tab "Jump" buttons)
+                    if let Some(nav_action) = view.show(ui, self.flight_view_tab) {
+                        // Switch to Plot tab to show the anomaly
+                        self.flight_view_tab = FlightViewTab::Plot;
+                        // Set the time range to focus on the anomaly
+                        view.set_time_range(
+                            nav_action.target_time_start,
+                            nav_action.target_time_end,
+                        );
+                        log::info!(
+                            "Navigating to time range: {:.1}s - {:.1}s",
+                            nav_action.target_time_start,
+                            nav_action.target_time_end
+                        );
+                    }
                 }
             });
         }

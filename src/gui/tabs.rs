@@ -1,3 +1,5 @@
+mod anomalies;
+mod dashboard;
 mod error;
 mod filter;
 mod plot;
@@ -9,6 +11,8 @@ mod vibe;
 
 use std::fmt::Display;
 
+pub use anomalies::*;
+pub use dashboard::*;
 pub use error::*;
 pub use filter::*;
 pub use plot::*;
@@ -24,10 +28,12 @@ const MIN_WIDE_WIDTH: f32 = 1000.0;
 #[derive(Default, Clone, Copy, PartialEq)]
 pub enum FlightViewTab {
     #[default]
+    Dashboard,
     Plot,
     Tune,
     Vibe,
     Stats,
+    Anomalies,
     Error,
     Setup,
     Suggestions,
@@ -37,10 +43,12 @@ pub enum FlightViewTab {
 impl Display for FlightViewTab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let val = match self {
+            Self::Dashboard => "📊 Dashboard",
             Self::Plot => "🗠  Plot",
             Self::Tune => "⛭  Tune",
             Self::Vibe => "💃 Vibe",
-            Self::Stats => "📊 Stats",
+            Self::Stats => "📈 Stats",
+            Self::Anomalies => "🚨 Anomalies",
             Self::Error => "⚠  Error",
             Self::Setup => "📋 Setup",
             Self::Suggestions => "💡 Suggestions",

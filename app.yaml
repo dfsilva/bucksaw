@@ -1,0 +1,5 @@
+kind: wasmer.io/App.v0
+name: bucksaw
+owner: dfsilva
+package: .
+app_id: da_2J7IAtxUwaV0

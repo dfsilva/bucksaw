@@ -420,7 +420,7 @@ impl FftAxis {
             .include_y(0.0)
             .include_y(1.0)
             .link_axis("time_vibes", true, true)
-            .link_cursor("time_vibes", true, true)
+            .link_cursor("global_timeseries", true, false)
             .y_axis_position(egui_plot::HPlacement::Right)
             .y_axis_width(3)
             .y_axis_formatter(move |gm, _, _| format!("{:.0}Hz", gm.value * max_freq))

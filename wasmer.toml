@@ -1,0 +1,9 @@
+[package]
+name = "bucksaw"
+version = "0.1.0"
+description = "Browser-based FPV tuning analyzer"
+
+[dependencies]
+
+[fs]
+public = "dist"
