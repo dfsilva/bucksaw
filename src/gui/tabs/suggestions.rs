@@ -1589,6 +1589,7 @@ impl SuggestionsTab {
                     }
                     
                     // Show AI response
+                    let mut clear_ai_response = false;
                     if let Some(ref response) = self.ai_response {
                         ui.add_space(12.0);
                         ui.separator();
@@ -1640,9 +1641,12 @@ impl SuggestionsTab {
                                 ui.output_mut(|o| o.copied_text = response.clone());
                             }
                             if ui.button("🗑 Clear").clicked() {
-                                self.ai_response = None;
+                                clear_ai_response = true;
                             }
                         });
+                    }
+                    if clear_ai_response {
+                        self.ai_response = None;
                     }
                 });
             
