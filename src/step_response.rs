@@ -19,14 +19,82 @@ fn fft_inverse(data: &[Complex32]) -> Vec<f32> {
     }
 }
 
+/// Smoothing level for step response calculation
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SmoothingLevel {
+    /// No smoothing applied
+    #[default]
+    Off,
+    /// Window size of 5 samples
+    Low,
+    /// Window size of 15 samples
+    Medium,
+    /// Window size of 31 samples
+    High,
+}
+
+impl SmoothingLevel {
+    pub const ALL: [SmoothingLevel; 4] = [
+        SmoothingLevel::Off,
+        SmoothingLevel::Low,
+        SmoothingLevel::Medium,
+        SmoothingLevel::High,
+    ];
+
+    /// Returns the window size for moving average smoothing
+    pub fn window_size(self) -> usize {
+        match self {
+            SmoothingLevel::Off => 1,
+            SmoothingLevel::Low => 5,
+            SmoothingLevel::Medium => 15,
+            SmoothingLevel::High => 31,
+        }
+    }
+}
+
+impl std::fmt::Display for SmoothingLevel {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SmoothingLevel::Off => write!(f, "Off"),
+            SmoothingLevel::Low => write!(f, "Low"),
+            SmoothingLevel::Medium => write!(f, "Medium"),
+            SmoothingLevel::High => write!(f, "High"),
+        }
+    }
+}
+
+/// Apply moving average smoothing to the data
+fn apply_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
+    if window_size <= 1 || data.len() < window_size {
+        return data.to_vec();
+    }
+
+    let half_window = window_size / 2;
+    let mut smoothed = Vec::with_capacity(data.len());
+
+    for i in 0..data.len() {
+        let start = i.saturating_sub(half_window);
+        let end = (i + half_window + 1).min(data.len());
+        let window = &data[start..end];
+        let avg = window.iter().sum::<f32>() / window.len() as f32;
+        smoothed.push(avg);
+    }
+
+    smoothed
+}
+
 pub fn calculate_step_response(
     times: &[f64],
     setpoint: &[f32],
     gyro_filtered: &[f32],
     sample_rate: f64,
+    smoothing: SmoothingLevel,
 ) -> Vec<(f64, f64)> {
+    // Apply smoothing to gyro data before FFT
+    let smoothed_gyro = apply_smoothing(gyro_filtered, smoothing.window_size());
+
     let input_spectrum = fft_forward(setpoint);
-    let output_spectrum = fft_forward(gyro_filtered);
+    let output_spectrum = fft_forward(&smoothed_gyro);
 
     let input_spec_conj: Vec<_> = input_spectrum.iter().map(|c| c.conj()).collect();
     let frequency_response: Vec<_> = input_spectrum

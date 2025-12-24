@@ -165,6 +165,65 @@ impl FlightData {
         self.get_vector_series("axisF")
     }
 
+    /// Calculate PID sum (P + I + D + F) for each axis
+    pub fn pid_sum(&self) -> Option<[Vec<f32>; 3]> {
+        let p = self.p()?;
+        let i = self.i()?;
+        let d = self.d();
+        let f = self.f();
+
+        let len = p[0].len();
+        let mut result: [Vec<f32>; 3] = [
+            Vec::with_capacity(len),
+            Vec::with_capacity(len),
+            Vec::with_capacity(len),
+        ];
+
+        for axis in 0..3 {
+            for idx in 0..len {
+                let p_val = p[axis].get(idx).copied().unwrap_or(0.0);
+                let i_val = i[axis].get(idx).copied().unwrap_or(0.0);
+                let d_val = d[axis].and_then(|d| d.get(idx).copied()).unwrap_or(0.0);
+                let f_val = f
+                    .as_ref()
+                    .and_then(|f| f[axis].get(idx).copied())
+                    .unwrap_or(0.0);
+                result[axis].push(p_val + i_val + d_val + f_val);
+            }
+        }
+
+        Some(result)
+    }
+
+    /// Get pre-filtered (raw) D-term if available
+    pub fn d_unfiltered(&self) -> [Option<&Vec<f32>>; 3] {
+        (0..3)
+            .map(|i| {
+                // Try different field names used by different firmware versions
+                self.main_values
+                    .get(&format!("axisDRaw[{}]", i))
+                    .or_else(|| self.main_values.get(&format!("axisD_UnFilt[{}]", i)))
+            })
+            .collect::<Vec<_>>()
+            .try_into()
+            .unwrap()
+    }
+
+    /// Get debug channel data (up to 8 channels depending on debug mode)
+    pub fn debug(&self) -> Option<Vec<&Vec<f32>>> {
+        let debug_count = self
+            .main_values
+            .keys()
+            .filter(|k| k.starts_with("debug["))
+            .count();
+        if debug_count == 0 {
+            return None;
+        }
+        (0..debug_count)
+            .map(|i| self.main_values.get(&format!("debug[{}]", i)))
+            .collect::<Option<Vec<_>>>()
+    }
+
     pub fn motor(&self) -> Option<Vec<&Vec<f32>>> {
         let motor_count = self
             .main_values

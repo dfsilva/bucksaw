@@ -1,14 +1,14 @@
-use std::sync::mpsc::{channel, Sender};
+use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 use egui_oszi::{TimeseriesGroup, TimeseriesLine, TimeseriesPlot, TimeseriesPlotMemory};
 use egui_plot::{Corner, Legend, PlotPoints};
 
+use crate::flight_data::FlightData;
 use crate::gui::colors::Colors;
 use crate::gui::flex::FlexColumns;
-use crate::step_response::calculate_step_response;
+use crate::step_response::{calculate_step_response, SmoothingLevel};
 use crate::utils::execute_in_background;
-use crate::{flight_data::FlightData, utils::BackgroundCompStore};
 
 use super::{MIN_WIDE_WIDTH, PLOT_HEIGHT};
 
@@ -23,7 +23,11 @@ pub struct TuneTab {
     pitch_plot: TimeseriesPlotMemory<f64, f32>,
     yaw_plot: TimeseriesPlotMemory<f64, f32>,
     fd: Arc<FlightData>,
-    step_responses: BackgroundCompStore<StepResponses>,
+    step_responses: Option<StepResponses>,
+    receiver: Option<Receiver<StepResponses>>,
+    smoothing: SmoothingLevel,
+    y_correction: f64,
+    y_scale: f64,
 }
 
 const AXIS_LABELS: [&str; 3] = ["Roll", "Pitch", "Yaw"];
@@ -32,30 +36,37 @@ impl TuneTab {
     pub fn new(fd: Arc<FlightData>) -> Self {
         // calculate step response in background thread
         let (sender, receiver) = channel();
-        let step_responses = BackgroundCompStore::new(receiver);
 
-        Self::calculate_responses(fd.clone(), sender);
+        Self::calculate_responses(fd.clone(), sender, SmoothingLevel::default());
         Self {
             roll_plot: TimeseriesPlotMemory::new("roll"),
             pitch_plot: TimeseriesPlotMemory::new("pitch"),
             yaw_plot: TimeseriesPlotMemory::new("yaw"),
-            step_responses,
+            step_responses: None,
+            receiver: Some(receiver),
             fd,
+            smoothing: SmoothingLevel::default(),
+            y_correction: 0.0,
+            y_scale: 1.5,
         }
     }
 
-    fn calculate_responses(fd: Arc<FlightData>, sender: Sender<StepResponses>) {
+    fn calculate_responses(
+        fd: Arc<FlightData>,
+        sender: Sender<StepResponses>,
+        smoothing: SmoothingLevel,
+    ) {
         execute_in_background(async move {
             let empty_fallback = Vec::new();
             let setpoints = fd.setpoint().unwrap_or([&empty_fallback; 4]);
             let gyro = fd.gyro_filtered().unwrap_or([&empty_fallback; 3]);
             let sample_rate = fd.sample_rate();
             let roll_step_response =
-                calculate_step_response(&fd.times, setpoints[0], gyro[0], sample_rate);
+                calculate_step_response(&fd.times, setpoints[0], gyro[0], sample_rate, smoothing);
             let pitch_step_response =
-                calculate_step_response(&fd.times, setpoints[1], gyro[1], sample_rate);
+                calculate_step_response(&fd.times, setpoints[1], gyro[1], sample_rate, smoothing);
             let yaw_step_response =
-                calculate_step_response(&fd.times, setpoints[2], gyro[2], sample_rate);
+                calculate_step_response(&fd.times, setpoints[2], gyro[2], sample_rate, smoothing);
             let _ = sender.send(StepResponses {
                 roll_step_response,
                 pitch_step_response,
@@ -64,11 +75,28 @@ impl TuneTab {
         });
     }
 
+    fn recalculate(&mut self) {
+        let (sender, receiver) = channel();
+        self.receiver = Some(receiver);
+        Self::calculate_responses(self.fd.clone(), sender, self.smoothing);
+    }
+
+    fn check_receiver(&mut self) {
+        if let Some(receiver) = &self.receiver {
+            if let Ok(result) = receiver.try_recv() {
+                self.step_responses = Some(result);
+                self.receiver = None;
+            }
+        }
+    }
+
     pub fn plot_step_response(
         ui: &mut egui::Ui,
         i: usize,
         step_response: &[(f64, f64)],
         total_width: f32,
+        y_correction: f64,
+        y_scale: f64,
     ) -> egui::Response {
         let height = if ui.available_width() < total_width {
             ui.available_height() / (3 - i) as f32
@@ -88,8 +116,16 @@ impl TuneTab {
             .y_axis_position(egui_plot::HPlacement::Right)
             .y_axis_width(3)
             .height(height)
+            .include_y(-y_scale + 1.0)
+            .include_y(y_scale + 1.0)
             .show(ui, |plot_ui| {
-                let points = PlotPoints::new(step_response.iter().map(|(x, y)| [*x, *y]).collect());
+                // Apply Y correction offset to each point
+                let points = PlotPoints::new(
+                    step_response
+                        .iter()
+                        .map(|(x, y)| [*x, *y + y_correction])
+                        .collect(),
+                );
                 let egui_line = egui_plot::Line::new(points)
                     .name(format!("Step Response ({})", AXIS_LABELS[i]))
                     .color(egui::Color32::from_rgb(0xaf, 0x3a, 0x03))
@@ -100,10 +136,52 @@ impl TuneTab {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui, timeseries_group: &mut TimeseriesGroup) {
-        if let Some(step_responses) = self.step_responses.get() {
+        // Check for pending recalculation results
+        self.check_receiver();
+
+        // Show smoothing controls first (before FlexColumns to avoid borrow issues)
+        let mut should_recalculate = false;
+        ui.horizontal(|ui| {
+            ui.label("Step Response Smoothing:");
+            let prev_smoothing = self.smoothing;
+            egui::ComboBox::from_id_source("smoothing_select")
+                .selected_text(self.smoothing.to_string())
+                .show_ui(ui, |ui| {
+                    for level in SmoothingLevel::ALL {
+                        ui.selectable_value(&mut self.smoothing, level, level.to_string());
+                    }
+                });
+            if self.smoothing != prev_smoothing {
+                should_recalculate = true;
+            }
+
+            ui.separator();
+
+            ui.label("Y Correction:");
+            ui.add(egui::Slider::new(&mut self.y_correction, -0.5..=0.5).step_by(0.01));
+
+            ui.separator();
+
+            ui.label("Y Scale:");
+            ui.add(egui::Slider::new(&mut self.y_scale, 0.3..=2.0).step_by(0.1));
+        });
+
+        if should_recalculate {
+            self.recalculate();
+        }
+
+        ui.separator();
+
+        if let Some(step_responses) = &self.step_responses {
             let total_width = ui.available_width();
             let times = &self.fd.times;
             let colors = Colors::get(ui);
+
+            // Clone step responses to avoid borrow issues
+            let roll_response = step_responses.roll_step_response.clone();
+            let pitch_response = step_responses.pitch_step_response.clone();
+            let yaw_response = step_responses.yaw_step_response.clone();
+
             FlexColumns::new(MIN_WIDE_WIDTH)
                 .column(|ui| {
                     ui.vertical(|ui| {
@@ -205,15 +283,16 @@ impl TuneTab {
                     ui.vertical(|ui| {
                         ui.heading("Step Response");
 
-                        for (i, axis) in [
-                            &step_responses.roll_step_response,
-                            &step_responses.pitch_step_response,
-                            &step_responses.yaw_step_response,
-                        ]
-                        .iter()
-                        .enumerate()
-                        {
-                            Self::plot_step_response(ui, i, axis, total_width);
+                        let responses = [&roll_response, &pitch_response, &yaw_response];
+                        for (i, axis) in responses.iter().enumerate() {
+                            Self::plot_step_response(
+                                ui,
+                                i,
+                                axis,
+                                total_width,
+                                self.y_correction,
+                                self.y_scale,
+                            );
                         }
                     })
                     .response

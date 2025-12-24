@@ -1,10 +1,20 @@
+mod error;
+mod filter;
 mod plot;
+mod setup;
+mod stats;
+mod suggestions;
 mod tune;
 mod vibe;
 
 use std::fmt::Display;
 
+pub use error::*;
+pub use filter::*;
 pub use plot::*;
+pub use setup::*;
+pub use stats::*;
+pub use suggestions::*;
 pub use tune::*;
 pub use vibe::*;
 
@@ -17,6 +27,11 @@ pub enum FlightViewTab {
     Plot,
     Tune,
     Vibe,
+    Stats,
+    Error,
+    Setup,
+    Suggestions,
+    Filter,
 }
 
 impl Display for FlightViewTab {
@@ -25,6 +40,11 @@ impl Display for FlightViewTab {
             Self::Plot => "🗠  Plot",
             Self::Tune => "⛭  Tune",
             Self::Vibe => "💃 Vibe",
+            Self::Stats => "📊 Stats",
+            Self::Error => "⚠  Error",
+            Self::Setup => "📋 Setup",
+            Self::Suggestions => "💡 Suggestions",
+            Self::Filter => "🔧 Filter",
         };
         write!(f, "{val}",)
     }

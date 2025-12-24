@@ -31,4 +31,13 @@ impl<C> BackgroundCompStore<C> {
             receiver,
         }
     }
+
+    /// Create a BackgroundCompStore with a pre-computed value
+    #[allow(dead_code)]
+    pub fn with_value(value: C, receiver: Receiver<C>) -> Self {
+        Self {
+            data: Some(value),
+            receiver,
+        }
+    }
 }

@@ -554,17 +554,55 @@ pub struct VibeTab {
     gyro_filtered_enabled: bool,
     dterm_raw_enabled: bool,
     dterm_filtered_enabled: bool,
+    setpoint_enabled: bool,
+    pid_error_enabled: bool,
+    pid_sum_enabled: bool,
 
     fft_settings: FftSettings,
+    max_freq_hz: f32,
 
     gyro_raw_ffts: FftVectorSeries,
     gyro_filtered_ffts: FftVectorSeries,
     dterm_filtered_ffts: FftVectorSeries,
+    setpoint_ffts: FftVectorSeries,
+    pid_error_ffts: FftVectorSeries,
+    pid_sum_ffts: FftVectorSeries,
+
+    // Cached computed data (needed for FFT callbacks)
+    #[allow(dead_code)]
+    pid_error_data: Option<Arc<[Vec<f32>; 3]>>,
+    #[allow(dead_code)]
+    pid_sum_data: Option<Arc<[Vec<f32>; 3]>>,
+
+    fd: Arc<FlightData>,
 }
+
+// Static storage for computed data (needed for FFT callbacks)
+static PID_ERROR_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
+static PID_SUM_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
 
 impl VibeTab {
     pub fn new(ctx: &egui::Context, fd: Arc<FlightData>) -> Self {
         let fft_settings = FftSettings::default();
+
+        // Pre-compute and cache PID error and PID sum data
+        let pid_error_data = if let (Some(sp), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
+            let len = sp[0].len().min(gyro[0].len());
+            let error: [Vec<f32>; 3] = [
+                (0..len).map(|i| sp[0][i] - gyro[0][i]).collect(),
+                (0..len).map(|i| sp[1][i] - gyro[1][i]).collect(),
+                (0..len).map(|i| sp[2][i] - gyro[2][i]).collect(),
+            ];
+            let _ = PID_ERROR_CACHE.set(error.clone());
+            Some(Arc::new(error))
+        } else {
+            None
+        };
+
+        let pid_sum_data = fd.pid_sum().map(|data| {
+            let _ = PID_SUM_CACHE.set(data.clone());
+            Arc::new(data)
+        });
 
         // TODO: unwrap
         let gyro_raw_ffts =
@@ -592,6 +630,34 @@ impl VibeTab {
                 fd.d()
             });
 
+        // Setpoint FFT (Roll, Pitch, Yaw only - first 3 elements)
+        let setpoint_ffts =
+            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
+                let sp = fd.setpoint();
+                match sp {
+                    Some(s) => [Some(s[0]), Some(s[1]), Some(s[2])],
+                    None => [None, None, None],
+                }
+            });
+
+        // PID Error FFT - uses cached data
+        let pid_error_ffts =
+            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |_fd: &FlightData| {
+                match PID_ERROR_CACHE.get() {
+                    Some(data) => [Some(&data[0]), Some(&data[1]), Some(&data[2])],
+                    None => [None, None, None],
+                }
+            });
+
+        // PID Sum FFT - uses cached data
+        let pid_sum_ffts =
+            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |_fd: &FlightData| {
+                match PID_SUM_CACHE.get() {
+                    Some(data) => [Some(&data[0]), Some(&data[1]), Some(&data[2])],
+                    None => [None, None, None],
+                }
+            });
+
         Self {
             domain: VibeDomain::Time,
 
@@ -602,13 +668,23 @@ impl VibeTab {
             gyro_filtered_enabled: true,
             dterm_raw_enabled: false, // TODO
             dterm_filtered_enabled: true,
+            setpoint_enabled: false,
+            pid_error_enabled: false,
+            pid_sum_enabled: false,
 
             fft_settings,
-
+            max_freq_hz: fd.sample_rate() as f32 / 2.0, // Nyquist
             gyro_raw_ffts,
             gyro_filtered_ffts,
-            //dterm_raw_ffts,
             dterm_filtered_ffts,
+            setpoint_ffts,
+            pid_error_ffts,
+            pid_sum_ffts,
+
+            pid_error_data,
+            pid_sum_data,
+
+            fd,
         }
     }
 
@@ -617,8 +693,13 @@ impl VibeTab {
             .set_fft_settings(self.fft_settings.clone());
         self.gyro_filtered_ffts
             .set_fft_settings(self.fft_settings.clone());
-        //self.dterm_raw_ffts.set_fft_settings(self.fft_settings.clone());
         self.dterm_filtered_ffts
+            .set_fft_settings(self.fft_settings.clone());
+        self.setpoint_ffts
+            .set_fft_settings(self.fft_settings.clone());
+        self.pid_error_ffts
+            .set_fft_settings(self.fft_settings.clone());
+        self.pid_sum_ffts
             .set_fft_settings(self.fft_settings.clone());
     }
 
@@ -626,6 +707,8 @@ impl VibeTab {
         let old_fft_settings = self.fft_settings.clone();
         let fft_size = self.fft_settings.size;
         let total_width = ui.available_width();
+        let sample_rate = self.fd.sample_rate() as f32;
+        let nyquist = sample_rate / 2.0;
 
         FlexLayout::new(1500.0, "Settings")
             .add(|ui| {
@@ -643,6 +726,15 @@ impl VibeTab {
                     ui.toggle_value(&mut self.gyro_filtered_enabled, "Gyro (filtered)");
                     ui.toggle_value(&mut self.dterm_raw_enabled, "D term (raw)");
                     ui.toggle_value(&mut self.dterm_filtered_enabled, "D term (filtered)");
+                })
+                .response
+            })
+            .add(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("More:");
+                    ui.toggle_value(&mut self.setpoint_enabled, "Setpoint");
+                    ui.toggle_value(&mut self.pid_error_enabled, "PID Error");
+                    ui.toggle_value(&mut self.pid_sum_enabled, "PID Sum");
                 })
                 .response
             })
@@ -671,6 +763,26 @@ impl VibeTab {
                             )
                         });
                     }
+                })
+                .response
+            })
+            .add(|ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Max Freq (Hz):");
+                    for freq in &[100.0_f32, 250.0, 500.0] {
+                        let label = if *freq == 100.0 {
+                            "Sub-100".to_string()
+                        } else {
+                            format!("{}Hz", freq)
+                        };
+                        ui.selectable_value(&mut self.max_freq_hz, *freq, &label);
+                    }
+                    // Also add Nyquist option
+                    ui.selectable_value(
+                        &mut self.max_freq_hz,
+                        nyquist,
+                        format!("Full ({:.0}Hz)", nyquist),
+                    );
                 })
                 .response
             })
@@ -728,6 +840,18 @@ impl VibeTab {
             .column_enabled(self.dterm_filtered_enabled, |ui| {
                 ui.heading("D Term (filtered)");
                 self.dterm_filtered_ffts.show(ui, self.domain, total_width)
+            })
+            .column_enabled(self.setpoint_enabled, |ui| {
+                ui.heading("Setpoint");
+                self.setpoint_ffts.show(ui, self.domain, total_width)
+            })
+            .column_enabled(self.pid_error_enabled, |ui| {
+                ui.heading("PID Error");
+                self.pid_error_ffts.show(ui, self.domain, total_width)
+            })
+            .column_enabled(self.pid_sum_enabled, |ui| {
+                ui.heading("PID Sum");
+                self.pid_sum_ffts.show(ui, self.domain, total_width)
             })
             .show(ui);
     }
