@@ -378,9 +378,14 @@ impl FftAxis {
                 throttle_buckets[bucket_i].push(chunk);
             }
 
-            let mut throttle_averages = Vec::new();
+            let mut throttle_averages: Vec<Option<Vec<f32>>> = Vec::new();
             for bucket in throttle_buckets.into_iter() {
                 let size = bucket.len();
+                if size == 0 {
+                    throttle_averages.push(None);
+                    continue;
+                }
+
                 let avg = bucket
                     .into_iter()
                     .map(|chunk| chunk.fft)
@@ -401,8 +406,45 @@ impl FftAxis {
                     .into_iter()
                     .map(|v| v / (size as f32))
                     .collect::<Vec<_>>();
-                throttle_averages.push(avg);
+                throttle_averages.push(Some(avg));
             }
+
+            // Interpolate missing buckets
+            for i in 0..THROTTLE_DOMAIN_BUCKETS {
+                if throttle_averages[i].is_some() {
+                    continue;
+                }
+
+                // Find left neighbor
+                let left = (0..i).rev().find(|&x| throttle_averages[x].is_some());
+                // Find right neighbor
+                let right =
+                    (i + 1..THROTTLE_DOMAIN_BUCKETS).find(|&x| throttle_averages[x].is_some());
+
+                let interpolated = match (left, right) {
+                    (Some(l), Some(r)) => {
+                        let left_vec = throttle_averages[l].as_ref().unwrap();
+                        let right_vec = throttle_averages[r].as_ref().unwrap();
+                        let t = (i - l) as f32 / (r - l) as f32;
+
+                        Some(
+                            left_vec
+                                .iter()
+                                .zip(right_vec.iter())
+                                .map(|(a, b)| a + (b - a) * t)
+                                .collect(),
+                        )
+                    }
+                    (Some(l), None) => throttle_averages[l].clone(),
+                    (None, Some(r)) => throttle_averages[r].clone(),
+                    (None, None) => Some(vec![0.0; fft_size / 2]),
+                };
+
+                throttle_averages[i] = interpolated;
+            }
+
+            let throttle_averages: Vec<Vec<f32>> =
+                throttle_averages.into_iter().map(|o| o.unwrap()).collect();
 
             let mut image = egui::ColorImage::new(
                 [THROTTLE_DOMAIN_BUCKETS, fft_size / 2],
@@ -755,7 +797,7 @@ impl VibeTab {
             });
 
         Self {
-            domain: VibeDomain::Time,
+            domain: VibeDomain::Throttle,
 
             gyro_raw_enabled: fd
                 .gyro_unfiltered()
