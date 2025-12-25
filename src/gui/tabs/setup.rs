@@ -881,39 +881,12 @@ impl SetupTab {
     fn show_filter_settings(&self, ui: &mut egui::Ui) {
         let headers = &self.fd.unknown_headers;
 
-        // Filter multiplier sliders
-        ui.horizontal(|ui| {
-            ui.label("Gyro Filter Multiplier:");
-            let mut gyro_mult = 1.05f32;
-            ui.add(egui::Slider::new(&mut gyro_mult, 0.25..=2.0).show_value(true));
-
-            ui.add_space(40.0);
-
-            ui.label("More Filtering");
-            ui.label(" ◀━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━▶ ");
-            ui.label("Less Filtering");
-        });
-
-        ui.horizontal(|ui| {
-            ui.label("D Term Filter Multiplier:");
-            let mut dterm_mult = 0.85f32;
-            ui.add(egui::Slider::new(&mut dterm_mult, 0.25..=2.0).show_value(true));
-        });
-
-        ui.add_space(12.0);
-
         ui.horizontal(|ui| {
             // Left column - Profile independent
             ui.vertical(|ui| {
                 ui.set_min_width(450.0);
 
-                ui.horizontal(|ui| {
-                    Self::section_header(ui, "Profile Independent Filter Settings");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label("Use Gyro Slider");
-                        Self::toggle_indicator(ui, false);
-                    });
-                });
+                Self::section_header(ui, "Profile Independent Filter Settings");
 
                 self.show_gyro_lowpass_filters(ui, headers);
                 ui.add_space(8.0);
@@ -930,13 +903,7 @@ impl SetupTab {
             ui.vertical(|ui| {
                 ui.set_min_width(400.0);
 
-                ui.horizontal(|ui| {
-                    Self::section_header(ui, "Profile Dependent Filter Settings");
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label("Use D Term Slider");
-                        Self::toggle_indicator(ui, true);
-                    });
-                });
+                Self::section_header(ui, "Profile Dependent Filter Settings");
 
                 self.show_dterm_lowpass_filters(ui, headers);
                 ui.add_space(8.0);
