@@ -662,6 +662,15 @@ Your recommendations should be:
 
 Format CLI commands in code blocks like: `set p_pitch = 50`"#;
 
+        let user_prompt = metrics.to_prompt();
+
+        // Log the AI prompt for debugging
+        crate::app_logger::log_info(
+            crate::app_logger::LogCategory::AI,
+            format!("Using model: {}", model_id),
+        );
+        crate::app_logger::log_ai_prompt(&user_prompt);
+
         ChatRequest {
             model: model_id.to_string(),
             messages: vec![
@@ -671,7 +680,7 @@ Format CLI commands in code blocks like: `set p_pitch = 50`"#;
                 },
                 ChatMessage {
                     role: "user".to_string(),
-                    content: metrics.to_prompt(),
+                    content: user_prompt,
                 },
             ],
             max_tokens: 2000,

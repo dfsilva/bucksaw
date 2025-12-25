@@ -2,6 +2,7 @@ mod anomalies;
 mod dashboard;
 mod error;
 mod filter;
+mod logs;
 mod plot;
 mod setup;
 mod stats;
@@ -15,6 +16,7 @@ pub use anomalies::*;
 pub use dashboard::*;
 pub use error::*;
 pub use filter::*;
+pub use logs::*;
 pub use plot::*;
 pub use setup::*;
 pub use stats::*;
@@ -38,6 +40,7 @@ pub enum FlightViewTab {
     Setup,
     Suggestions,
     Filter,
+    Logs,
 }
 
 impl Display for FlightViewTab {
@@ -53,6 +56,7 @@ impl Display for FlightViewTab {
             Self::Setup => "📋 Setup",
             Self::Suggestions => "💡 Suggestions",
             Self::Filter => "🔧 Filter",
+            Self::Logs => "📜 Logs",
         };
         write!(f, "{val}",)
     }

@@ -2000,8 +2000,8 @@ impl SuggestionsTab {
         };
         
         FlightMetrics {
-            firmware: headers.get("Firmware revision").cloned().unwrap_or_else(|| "Unknown".to_string()),
-            craft_name: headers.get("Craft name").cloned().unwrap_or_else(|| "Unknown".to_string()),
+            firmware: format!("{} {}", self.fd.firmware.name(), self.fd.firmware.version()),
+            craft_name: self.fd.craft_name.clone().unwrap_or_else(|| "Unknown".to_string()),
             duration_sec: duration,
             roll_pid,
             pitch_pid,

@@ -120,7 +120,7 @@ impl eframe::App for App {
 
                     ui.separator();
 
-                    const TABS: [FlightViewTab; 10] = [
+                    const TABS: [FlightViewTab; 11] = [
                         FlightViewTab::Dashboard,
                         FlightViewTab::Plot,
                         FlightViewTab::Tune,
@@ -131,6 +131,7 @@ impl eframe::App for App {
                         FlightViewTab::Setup,
                         FlightViewTab::Suggestions,
                         FlightViewTab::Filter,
+                        FlightViewTab::Logs,
                     ];
                     for tab in TABS.into_iter() {
                         let label = if narrow {

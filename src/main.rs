@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")] // hide console window on Windows in release
 
 mod ai_integration;
+pub mod app_logger;
 mod flight_data;
 mod gui;
 mod iter;
