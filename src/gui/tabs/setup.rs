@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Vec2};
+use egui_plot::{Legend, Line, Plot, PlotPoints};
 
 use crate::flight_data::FlightData;
 use crate::gui::colors::Colors;
@@ -147,10 +148,6 @@ impl SetupTab {
                 ui.set_min_width(left_width);
                 ui.set_max_width(left_width);
                 self.show_pid_table(ui);
-                ui.add_space(12.0);
-                self.show_pid_sliders(ui);
-                ui.add_space(12.0);
-                self.show_angle_horizon_section(ui);
             });
 
             ui.separator();
@@ -243,111 +240,6 @@ impl SetupTab {
                 Self::value_field(ui, ff_val);
             });
         }
-    }
-
-    fn show_pid_sliders(&self, ui: &mut egui::Ui) {
-        let headers = &self.fd.unknown_headers;
-
-        Self::section_header(ui, "Mode: RP");
-
-        let slider_configs = [
-            ("Damping:", "d_max_gain", 1.7, 0.0, 3.0),
-            ("Tracking:", "d_max_advance", 1.2, 0.0, 3.0),
-            ("Stick Response:", "feedforward_weight", 0.65, 0.0, 2.0),
-            ("Dynamic Damping:", "iterm_relax_cutoff", 0.25, 0.0, 1.0),
-            ("Drift - Wobble:", "thrust_linear", 0.5, 0.0, 2.0),
-            ("Pitch Damping:", "d_min_pitch", 1.1, 0.0, 2.0),
-            ("Pitch Tracking:", "feedforward_transition", 1.1, 0.0, 2.0),
-            ("Master Multiplier:", "motor_output_limit", 1.6, 0.0, 3.0),
-        ];
-
-        for (label, key, default, min, max) in slider_configs {
-            ui.horizontal(|ui| {
-                ui.label(RichText::new(label).color(betaflight_colors::TEXT_LABEL));
-
-                let value: f32 = headers
-                    .get(key)
-                    .and_then(|s| s.parse().ok())
-                    .unwrap_or(default);
-
-                // Display value
-                ui.label(format!("{:.2}", value));
-
-                // Slider (read-only visualization)
-                let mut val = value;
-                ui.add(egui::Slider::new(&mut val, min..=max).show_value(false));
-            });
-        }
-
-        // Warning message
-        ui.add_space(8.0);
-        ui.colored_label(
-            betaflight_colors::ROLL_RED,
-            "⚠ CAUTION: Current slider positions may cause flyaways, motor damage or unsafe craft behaviour. Please proceed with caution."
-        );
-    }
-
-    fn show_angle_horizon_section(&self, ui: &mut egui::Ui) {
-        Self::section_header(ui, "Angle/Horizon");
-
-        let headers = &self.fd.unknown_headers;
-
-        egui::Grid::new("angle_horizon_grid")
-            .num_columns(4)
-            .spacing([20.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("");
-                ui.label(RichText::new("Strength").strong());
-                ui.label(RichText::new("Transition").strong());
-                ui.end_row();
-
-                ui.label("Angle");
-                let angle_str = headers
-                    .get("angle_strength")
-                    .unwrap_or(&"50".to_string())
-                    .clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut angle_str.clone())
-                        .desired_width(50.0)
-                        .interactive(false),
-                );
-                ui.label("");
-                ui.end_row();
-
-                ui.label("Horizon");
-                let horizon_str = headers
-                    .get("horizon_strength")
-                    .unwrap_or(&"75".to_string())
-                    .clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut horizon_str.clone())
-                        .desired_width(50.0)
-                        .interactive(false),
-                );
-                let horizon_trans = headers
-                    .get("horizon_transition")
-                    .unwrap_or(&"75".to_string())
-                    .clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut horizon_trans.clone())
-                        .desired_width(50.0)
-                        .interactive(false),
-                );
-                ui.end_row();
-
-                ui.label("");
-                ui.label(RichText::new("Angle Limit").strong());
-                let angle_limit = headers
-                    .get("angle_limit")
-                    .unwrap_or(&"60".to_string())
-                    .clone();
-                ui.add(
-                    egui::TextEdit::singleline(&mut angle_limit.clone())
-                        .desired_width(50.0)
-                        .interactive(false),
-                );
-                ui.end_row();
-            });
     }
 
     fn show_pid_controller_settings(&self, ui: &mut egui::Ui) {
@@ -733,18 +625,95 @@ impl SetupTab {
 
                 ui.add_space(12.0);
                 Self::section_header(ui, "Rates Preview");
-                // Placeholder for rates graph
-                let (rect, _) =
-                    ui.allocate_exact_size(Vec2::new(350.0, 200.0), egui::Sense::hover());
-                ui.painter()
-                    .rect_filled(rect, 4.0, betaflight_colors::BG_SECTION);
-                ui.painter().text(
-                    rect.center(),
-                    egui::Align2::CENTER_CENTER,
-                    "Rates Preview Graph",
-                    egui::FontId::proportional(14.0),
-                    betaflight_colors::TEXT_LABEL,
-                );
+
+                // Calculate rates curves for each axis
+                let get_rate_val = |key: &str, default: f32| -> f32 {
+                    headers
+                        .get(key)
+                        .and_then(|s| s.parse().ok())
+                        .unwrap_or(default)
+                };
+
+                // Get rate parameters for each axis
+                let roll_center = get_rate_val("roll_rc_rate", 30.0);
+                let roll_max = get_rate_val("roll_srate", 800.0);
+                let roll_expo = get_rate_val("roll_expo", 0.35);
+
+                let pitch_center = get_rate_val("pitch_rc_rate", 30.0);
+                let pitch_max = get_rate_val("pitch_srate", 800.0);
+                let pitch_expo = get_rate_val("pitch_expo", 0.35);
+
+                let yaw_center = get_rate_val("yaw_rc_rate", 30.0);
+                let yaw_max = get_rate_val("yaw_srate", 650.0);
+                let yaw_expo = get_rate_val("yaw_expo", 0.35);
+
+                // Betaflight Actual rates formula
+                // rate = center_sensitivity * stick + (max_rate - center_sensitivity) * stick^3 * (1 - expo + expo * stick^2)
+                let calc_rate = |stick: f64, center: f64, max_rate: f64, expo: f64| -> f64 {
+                    let stick_abs = stick.abs();
+                    let expo_factor = 1.0 - expo + expo * stick_abs * stick_abs;
+                    center * stick_abs + (max_rate - center) * stick_abs.powi(3) * expo_factor
+                };
+
+                // Generate points for each axis (stick input 0-100%)
+                let steps = 50;
+                let roll_points: PlotPoints = (0..=steps)
+                    .map(|i| {
+                        let stick = i as f64 / steps as f64;
+                        let rate =
+                            calc_rate(stick, roll_center as f64, roll_max as f64, roll_expo as f64);
+                        [stick * 100.0, rate]
+                    })
+                    .collect();
+
+                let pitch_points: PlotPoints = (0..=steps)
+                    .map(|i| {
+                        let stick = i as f64 / steps as f64;
+                        let rate = calc_rate(
+                            stick,
+                            pitch_center as f64,
+                            pitch_max as f64,
+                            pitch_expo as f64,
+                        );
+                        [stick * 100.0, rate]
+                    })
+                    .collect();
+
+                let yaw_points: PlotPoints = (0..=steps)
+                    .map(|i| {
+                        let stick = i as f64 / steps as f64;
+                        let rate =
+                            calc_rate(stick, yaw_center as f64, yaw_max as f64, yaw_expo as f64);
+                        [stick * 100.0, rate]
+                    })
+                    .collect();
+
+                Plot::new("rates_preview_plot")
+                    .legend(Legend::default())
+                    .height(200.0)
+                    .width(350.0)
+                    .x_axis_label("Stick Input (%)")
+                    .y_axis_label("Rate (deg/s)")
+                    .show(ui, |plot_ui| {
+                        plot_ui.line(
+                            Line::new(roll_points)
+                                .name("Roll")
+                                .color(betaflight_colors::ROLL_RED)
+                                .width(2.0),
+                        );
+                        plot_ui.line(
+                            Line::new(pitch_points)
+                                .name("Pitch")
+                                .color(betaflight_colors::PITCH_GREEN)
+                                .width(2.0),
+                        );
+                        plot_ui.line(
+                            Line::new(yaw_points)
+                                .name("Yaw")
+                                .color(betaflight_colors::YAW_YELLOW)
+                                .width(2.0),
+                        );
+                    });
             });
 
             ui.separator();
