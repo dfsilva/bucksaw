@@ -7,7 +7,9 @@ use egui_plot::{Corner, Legend, PlotPoints};
 use crate::flight_data::FlightData;
 use crate::gui::colors::Colors;
 use crate::gui::flex::FlexColumns;
-use crate::step_response::{calculate_step_response, SmoothingLevel};
+use crate::step_response::{
+    calculate_step_response_with_config, SmoothingLevel, StepResponseConfig,
+};
 use crate::utils::execute_in_background;
 
 use super::{MIN_WIDE_WIDTH, PLOT_HEIGHT};
@@ -26,6 +28,8 @@ pub struct TuneTab {
     step_responses: Option<StepResponses>,
     receiver: Option<Receiver<StepResponses>>,
     smoothing: SmoothingLevel,
+    /// Minimum input threshold in deg/s for segment filtering
+    min_input_threshold: f32,
     y_correction: f64,
     y_scale: f64,
     /// Overlay all axes on one plot for comparison
@@ -48,7 +52,7 @@ impl TuneTab {
         // calculate step response in background thread
         let (sender, receiver) = channel();
 
-        Self::calculate_responses(fd.clone(), sender, SmoothingLevel::default());
+        Self::calculate_responses(fd.clone(), sender, SmoothingLevel::default(), 20.0);
         Self {
             roll_plot: TimeseriesPlotMemory::new("roll"),
             pitch_plot: TimeseriesPlotMemory::new("pitch"),
@@ -57,6 +61,7 @@ impl TuneTab {
             receiver: Some(receiver),
             fd,
             smoothing: SmoothingLevel::default(),
+            min_input_threshold: 20.0,
             y_correction: 0.0,
             y_scale: 1.5,
             overlay_mode: false,
@@ -69,18 +74,43 @@ impl TuneTab {
         fd: Arc<FlightData>,
         sender: Sender<StepResponses>,
         smoothing: SmoothingLevel,
+        min_input_threshold: f32,
     ) {
         execute_in_background(async move {
             let empty_fallback = Vec::new();
             let setpoints = fd.setpoint().unwrap_or([&empty_fallback; 4]);
             let gyro = fd.gyro_filtered().unwrap_or([&empty_fallback; 3]);
             let sample_rate = fd.sample_rate();
-            let roll_step_response =
-                calculate_step_response(&fd.times, setpoints[0], gyro[0], sample_rate, smoothing);
-            let pitch_step_response =
-                calculate_step_response(&fd.times, setpoints[1], gyro[1], sample_rate, smoothing);
-            let yaw_step_response =
-                calculate_step_response(&fd.times, setpoints[2], gyro[2], sample_rate, smoothing);
+
+            let config = StepResponseConfig {
+                min_input_threshold,
+                ..Default::default()
+            };
+
+            let roll_step_response = calculate_step_response_with_config(
+                &fd.times,
+                setpoints[0],
+                gyro[0],
+                sample_rate,
+                smoothing,
+                config,
+            );
+            let pitch_step_response = calculate_step_response_with_config(
+                &fd.times,
+                setpoints[1],
+                gyro[1],
+                sample_rate,
+                smoothing,
+                config,
+            );
+            let yaw_step_response = calculate_step_response_with_config(
+                &fd.times,
+                setpoints[2],
+                gyro[2],
+                sample_rate,
+                smoothing,
+                config,
+            );
             let _ = sender.send(StepResponses {
                 roll_step_response,
                 pitch_step_response,
@@ -92,7 +122,12 @@ impl TuneTab {
     fn recalculate(&mut self) {
         let (sender, receiver) = channel();
         self.receiver = Some(receiver);
-        Self::calculate_responses(self.fd.clone(), sender, self.smoothing);
+        Self::calculate_responses(
+            self.fd.clone(),
+            sender,
+            self.smoothing,
+            self.min_input_threshold,
+        );
     }
 
     fn check_receiver(&mut self) {
@@ -201,6 +236,21 @@ impl TuneTab {
                     }
                 });
             if self.smoothing != prev_smoothing {
+                should_recalculate = true;
+            }
+
+            ui.separator();
+
+            // Min Input threshold control
+            ui.label("Min Input:");
+            let prev_min_input = self.min_input_threshold;
+            ui.add(
+                egui::Slider::new(&mut self.min_input_threshold, 10.0..=100.0)
+                    .suffix("°/s")
+                    .max_decimals(0),
+            )
+            .on_hover_text("Minimum setpoint threshold (deg/s) for segment filtering. Lower values include more data, higher values filter noisy segments.");
+            if (self.min_input_threshold - prev_min_input).abs() > 0.1 {
                 should_recalculate = true;
             }
 

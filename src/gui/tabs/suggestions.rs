@@ -3,7 +3,7 @@ use std::sync::mpsc::Receiver;
 
 use egui::{Color32, RichText, Ui};
 
-use crate::ai_integration::{AIAnalysisResult, AIModel, FlightMetrics, ModelFetchResult, OpenRouterClient, DEFAULT_MODELS};
+use crate::ai_integration::{AIAnalysisResult, AIModel, AnalysisFocus, FlightMetrics, ModelFetchResult, OpenRouterClient, DEFAULT_MODELS};
 use crate::flight_data::FlightData;
 use crate::step_response::{calculate_step_response, SmoothingLevel};
 
@@ -317,6 +317,9 @@ pub struct SuggestionsTab {
     models: Vec<AIModel>,
     models_loading: bool,
     models_receiver: Option<Receiver<ModelFetchResult>>,
+    
+    // Analysis focus option
+    analysis_focus: AnalysisFocus,
 }
 
 impl SuggestionsTab {
@@ -359,6 +362,7 @@ impl SuggestionsTab {
             models: default_models,
             models_loading: true,
             models_receiver,
+            analysis_focus: AnalysisFocus::default(),
         }
     }
 
@@ -1687,6 +1691,25 @@ impl SuggestionsTab {
                     
                     ui.add_space(8.0);
                     
+                    // Analysis focus dropdown
+                    ui.horizontal(|ui| {
+                        ui.label("Analysis Focus:");
+                        egui::ComboBox::from_id_source("analysis_focus")
+                            .selected_text(format!("{}", self.analysis_focus))
+                            .width(180.0)
+                            .show_ui(ui, |ui| {
+                                for focus in AnalysisFocus::ALL {
+                                    ui.selectable_value(
+                                        &mut self.analysis_focus,
+                                        focus,
+                                        format!("{}", focus),
+                                    );
+                                }
+                            });
+                    });
+                    
+                    ui.add_space(8.0);
+                    
                     ui.horizontal(|ui| {
                         let can_analyze = !self.api_key.is_empty() && 
                                           !self.ai_loading && 
@@ -2132,6 +2155,9 @@ impl SuggestionsTab {
             // Misc
             integrated_yaw: headers.get("use_integrated_yaw").map(|s| s != "0").unwrap_or(false),
             abs_control_gain: parse_u32("abs_control_gain"),
+            
+            // Analysis focus
+            analysis_focus: self.analysis_focus,
         }
     }
     

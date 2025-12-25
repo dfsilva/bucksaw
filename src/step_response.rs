@@ -20,16 +20,17 @@ fn fft_inverse(data: &[Complex32]) -> Vec<f32> {
 }
 
 /// Smoothing level for step response calculation
+/// Values match PID Toolbox: [1, 20, 40, 60]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
 pub enum SmoothingLevel {
-    /// No smoothing applied
+    /// No smoothing applied (span = 1)
     #[default]
     Off,
-    /// Window size of 5 samples
+    /// Low smoothing (span = 20)
     Low,
-    /// Window size of 15 samples
+    /// Medium smoothing (span = 40)
     Medium,
-    /// Window size of 31 samples
+    /// High smoothing (span = 60)
     High,
 }
 
@@ -41,13 +42,13 @@ impl SmoothingLevel {
         SmoothingLevel::High,
     ];
 
-    /// Returns the window size for moving average smoothing
+    /// Returns the window size for smoothing (matches PID Toolbox smoothVals)
     pub fn window_size(self) -> usize {
         match self {
             SmoothingLevel::Off => 1,
-            SmoothingLevel::Low => 5,
-            SmoothingLevel::Medium => 15,
-            SmoothingLevel::High => 31,
+            SmoothingLevel::Low => 20,
+            SmoothingLevel::Medium => 40,
+            SmoothingLevel::High => 60,
         }
     }
 }
@@ -83,18 +84,39 @@ fn apply_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
     smoothed
 }
 
+/// Configuration for step response calculation
+#[derive(Clone, Copy, Debug)]
+pub struct StepResponseConfig {
+    /// Minimum input threshold in deg/s (default: 20)
+    pub min_input_threshold: f32,
+    /// Segment duration in seconds (default: 2.0)
+    pub segment_duration_sec: f32,
+    /// Step response window in milliseconds (default: 500)
+    pub response_window_ms: f32,
+    /// Segment overlap/slide in seconds (default: 0.2)
+    pub segment_slide_sec: f32,
+}
+
+impl Default for StepResponseConfig {
+    fn default() -> Self {
+        Self {
+            min_input_threshold: 20.0,
+            segment_duration_sec: 2.0,
+            response_window_ms: 500.0,
+            segment_slide_sec: 0.2,
+        }
+    }
+}
+
 pub fn calculate_step_response(
-    times: &[f64],
+    _times: &[f64],
     setpoint: &[f32],
     gyro_filtered: &[f32],
     sample_rate: f64,
     smoothing: SmoothingLevel,
 ) -> Vec<(f64, f64)> {
-    // Apply smoothing to gyro data before FFT
-    let smoothed_gyro = apply_smoothing(gyro_filtered, smoothing.window_size());
-
     let input_spectrum = fft_forward(setpoint);
-    let output_spectrum = fft_forward(&smoothed_gyro);
+    let output_spectrum = fft_forward(gyro_filtered);
 
     let input_spec_conj: Vec<_> = input_spectrum.iter().map(|c| c.conj()).collect();
     let frequency_response: Vec<_> = input_spectrum
@@ -113,16 +135,54 @@ pub fn calculate_step_response(
         })
         .collect();
 
-    let avg = step_response.iter().sum::<f32>() / (step_response.len() as f32);
-    let normalized = step_response
-        .iter()
-        .take((sample_rate / 2.0) as usize) // limit to last 500ms
-        .map(|x| x / avg);
+    // Take first 500ms worth of samples (sample_rate is in Hz)
+    // 500ms = 0.5 seconds, so samples = sample_rate * 0.5
+    let samples_500ms = (sample_rate * 0.5) as usize;
+    let response_len = samples_500ms.min(step_response.len());
 
-    let start = times.first().cloned().unwrap_or(0.0);
-    times
+    if response_len == 0 {
+        return vec![];
+    }
+
+    // Apply smoothing to the step response (this is what PID Toolbox does)
+    let response_slice = &step_response[..response_len];
+    let smoothed_response = apply_smoothing(response_slice, smoothing.window_size());
+
+    // Normalize by steady-state value (average of last 30%)
+    let steady_start = (response_len as f64 * 0.7) as usize;
+    let steady_state = if steady_start < smoothed_response.len() {
+        let steady_slice = &smoothed_response[steady_start..];
+        steady_slice.iter().sum::<f32>() / steady_slice.len() as f32
+    } else {
+        smoothed_response.iter().sum::<f32>() / smoothed_response.len() as f32
+    };
+
+    if steady_state.abs() < 1e-10 {
+        return vec![];
+    }
+
+    // Output: time in milliseconds, value normalized so steady-state = 1.0
+    // time_step_ms = 1000 / sample_rate (converting from samples to milliseconds)
+    let time_step_ms = 1000.0 / sample_rate;
+    smoothed_response
         .iter()
-        .zip(normalized)
-        .map(|(t, s)| (*t - start, s as f64))
+        .enumerate()
+        .map(|(i, &val)| (i as f64 * time_step_ms, (val / steady_state) as f64))
         .collect()
+}
+
+/// Calculate step response with custom configuration
+/// Note: Currently uses the same algorithm as calculate_step_response,
+/// but config.min_input_threshold is available for future segment-based filtering
+pub fn calculate_step_response_with_config(
+    times: &[f64],
+    setpoint: &[f32],
+    gyro_filtered: &[f32],
+    sample_rate: f64,
+    smoothing: SmoothingLevel,
+    _config: StepResponseConfig,
+) -> Vec<(f64, f64)> {
+    // For now, use the same proven algorithm
+    // The config is kept for API compatibility and future enhancements
+    calculate_step_response(times, setpoint, gyro_filtered, sample_rate, smoothing)
 }

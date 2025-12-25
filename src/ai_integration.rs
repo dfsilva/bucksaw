@@ -181,6 +181,40 @@ struct ErrorDetail {
     message: String,
 }
 
+/// Analysis focus option for AI tuning recommendations
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AnalysisFocus {
+    #[default]
+    /// General tuning - balanced approach
+    General,
+    /// Focus on reducing latency for snappier response
+    ReduceLatency,
+    /// Focus on reducing noise and motor heat
+    ReduceNoise,
+    /// Focus on maximum performance for racing
+    MaxPerformance,
+}
+
+impl AnalysisFocus {
+    pub const ALL: [AnalysisFocus; 4] = [
+        AnalysisFocus::General,
+        AnalysisFocus::ReduceLatency,
+        AnalysisFocus::ReduceNoise,
+        AnalysisFocus::MaxPerformance,
+    ];
+}
+
+impl std::fmt::Display for AnalysisFocus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnalysisFocus::General => write!(f, "🎯 General"),
+            AnalysisFocus::ReduceLatency => write!(f, "⚡ Reduce Latency"),
+            AnalysisFocus::ReduceNoise => write!(f, "🔇 Reduce Noise"),
+            AnalysisFocus::MaxPerformance => write!(f, "🏁 Max Performance"),
+        }
+    }
+}
+
 /// Flight metrics to send to AI
 #[derive(Clone)]
 pub struct FlightMetrics {
@@ -273,6 +307,9 @@ pub struct FlightMetrics {
     // Misc
     pub integrated_yaw: bool,
     pub abs_control_gain: Option<u32>,
+
+    /// Analysis focus for AI recommendations
+    pub analysis_focus: AnalysisFocus,
 }
 
 impl FlightMetrics {
@@ -462,8 +499,40 @@ impl FlightMetrics {
             format!("## PID Controller Settings\n{}", info)
         };
 
+        // Build focus-specific instructions
+        let focus_instruction = match self.analysis_focus {
+            AnalysisFocus::General => "Provide balanced tuning recommendations considering both performance and noise control.".to_string(),
+            AnalysisFocus::ReduceLatency => r#"**USER PRIORITY: REDUCE LATENCY**
+Focus primarily on reducing input-to-response delay. Recommend:
+- Raising filter cutoff frequencies where noise permits
+- Reducing filter delay by using higher cutoffs for gyro_lpf, dterm_lpf
+- Increasing Feedforward for faster stick response
+- Optimizing D-term filtering for lower delay
+- Reducing smoothing factors
+- Consider suggests for iterm_relax and feedforward_transition
+WARNING: Be mindful that reducing latency too aggressively can increase noise and motor heat."#.to_string(),
+            AnalysisFocus::ReduceNoise => r#"**USER PRIORITY: REDUCE NOISE**
+Focus primarily on reducing vibrations and motor heat. Recommend:
+- Lower filter cutoff frequencies
+- Increase dynamic notch count if needed
+- Lower D-gain if D-term noise is high
+- Enable or optimize RPM filtering if available
+- Suggest safer, more conservative filter settings
+- Prioritize motor longevity over responsiveness"#.to_string(),
+            AnalysisFocus::MaxPerformance => r#"**USER PRIORITY: MAXIMUM PERFORMANCE**
+Focus on achieving the fastest, most responsive tune for racing. Recommend:
+- Aggressive filter settings (high cutoffs) where noise permits
+- Higher P and D gains for sharper response
+- Higher Feedforward for instant reaction
+- Lower filtering delay at the expense of some noise tolerance
+- Optimize for competition use, accepting trade-offs in motor heat
+WARNING: These recommendations may increase motor wear and temperature."#.to_string(),
+        };
+
         format!(
             r#"Analyze this FPV drone flight log and provide specific tuning recommendations.
+
+{focus}
 
 IMPORTANT: The user is running firmware version "{firmware}". 
 All CLI commands you provide MUST be compatible with this exact firmware version.
@@ -473,6 +542,7 @@ Do NOT suggest commands or parameters that don't exist in this version.
 - Firmware Version: {firmware}
 - Craft Name: {craft}
 - Flight Duration: {duration:.1}s"#,
+            focus = focus_instruction,
             firmware = self.firmware,
             craft = self.craft_name,
             duration = self.duration_sec,
