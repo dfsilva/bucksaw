@@ -2168,7 +2168,7 @@ impl SuggestionsTab {
     
     /// Generate CLI export string, optionally filtered by severity
     fn generate_cli_export_filtered(&self, severity_filter: Option<Severity>) -> String {
-        let mut output = String::from("# Bucksaw Tuning Suggestions\n");
+        let mut output = String::from("# PID Lab Tuning Suggestions\n");
         output.push_str("# Generated from flight log analysis\n");
         output.push_str("# Apply in Betaflight CLI (Configurator → CLI tab)\n\n");
         

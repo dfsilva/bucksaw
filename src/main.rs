@@ -25,7 +25,7 @@ fn run_app(path: Option<PathBuf>) {
     {
         let native_options = eframe::NativeOptions::default();
         eframe::run_native(
-            "bucksaw",
+            "pid-lab",
             native_options,
             Box::new(|cc| Box::new(App::new(cc, path))),
         )

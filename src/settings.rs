@@ -1,4 +1,4 @@
-//! Settings persistence module for Bucksaw
+//! Settings persistence module for PID Lab
 //! Supports both native (file-based) and WASM (localStorage) targets
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +18,7 @@ pub struct AppSettings {
     pub ai: AISettings,
 }
 
-const SETTINGS_KEY: &str = "bucksaw_settings";
+const SETTINGS_KEY: &str = "pid_lab_settings";
 
 impl AppSettings {
     /// Load settings from persistent storage
@@ -51,7 +51,7 @@ impl AppSettings {
 
     #[cfg(not(target_arch = "wasm32"))]
     fn config_path() -> Option<std::path::PathBuf> {
-        dirs::config_dir().map(|p| p.join("bucksaw").join("settings.json"))
+        dirs::config_dir().map(|p| p.join("pid-lab").join("settings.json"))
     }
 
     #[cfg(not(target_arch = "wasm32"))]

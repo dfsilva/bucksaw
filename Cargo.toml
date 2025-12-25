@@ -1,5 +1,5 @@
 [package]
-name = "bucksaw"
+name = "pid-lab"
 version = "0.1.0"
 edition = "2021"
 repository = "https://github.com/KoffeinFlummi/bucksaw"
