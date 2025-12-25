@@ -473,13 +473,10 @@ impl FftAxis {
         }
     }
 
-    pub fn show_time(&mut self, ui: &mut egui::Ui, total_width: f32) -> egui::Response {
+    pub fn show_time(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let max_freq = self.flight_data.sample_rate() / 2.0;
-        let height = if ui.available_width() < total_width {
-            ui.available_height()
-        } else {
-            PLOT_HEIGHT
-        };
+        let height = PLOT_HEIGHT;
+        let width = ui.available_width();
 
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
@@ -497,6 +494,7 @@ impl FftAxis {
             .y_axis_formatter(move |gm, _, _| format!("{:.0}Hz", gm.value * max_freq))
             .label_formatter(move |_name, val| format!("{:.0}Hz\n{:.3}s", val.y * max_freq, val.x))
             .height(height)
+            .width(width)
             .show(ui, |plot_ui| {
                 for (t_start, t_end, texture) in self.time_textures.iter() {
                     let center = (t_start + t_end) / 2.0;
@@ -513,13 +511,10 @@ impl FftAxis {
             .response
     }
 
-    pub fn show_throttle(&mut self, ui: &mut egui::Ui, total_width: f32) -> egui::Response {
+    pub fn show_throttle(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let max_freq = self.flight_data.sample_rate() / 2.0;
-        let height = if ui.available_width() < total_width {
-            ui.available_height()
-        } else {
-            PLOT_HEIGHT
-        };
+        let height = PLOT_HEIGHT;
+        let width = ui.available_width();
 
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
@@ -540,6 +535,7 @@ impl FftAxis {
                 format!("{:.0}Hz\n{:.0}%", val.y * max_freq, val.x * 100.0)
             })
             .height(height)
+            .width(width)
             .reset()
             .show(ui, |plot_ui| {
                 if let Some(texture) = self.throttle_texture.as_mut() {
@@ -555,20 +551,15 @@ impl FftAxis {
             .response
     }
 
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        domain: VibeDomain,
-        total_width: f32,
-    ) -> egui::Response {
+    pub fn show(&mut self, ui: &mut egui::Ui, domain: VibeDomain) -> egui::Response {
         self.process_updates();
 
         if self.chunks.is_empty() {
             ui.label("")
         } else {
             match domain {
-                VibeDomain::Time => self.show_time(ui, total_width),
-                VibeDomain::Throttle => self.show_throttle(ui, total_width),
+                VibeDomain::Time => self.show_time(ui),
+                VibeDomain::Throttle => self.show_throttle(ui),
             }
         }
     }
@@ -604,28 +595,40 @@ impl FftVectorSeries {
         &mut self,
         ui: &mut egui::Ui,
         domain: VibeDomain,
-        total_width: f32,
+        show_labels: bool,
     ) -> egui::Response {
         let available_height = ui.available_height();
-        let row_height = available_height / 3.0;
+        let row_height = (available_height / 3.0).max(PLOT_HEIGHT);
         ui.vertical(|ui| {
             for axis in self.axes.iter_mut() {
-                ui.allocate_ui_with_layout(
-                    egui::vec2(ui.available_width(), row_height),
-                    egui::Layout::left_to_right(egui::Align::Center),
-                    |ui| {
-                        // Add axis label on the left (narrow column)
-                        ui.allocate_ui(egui::vec2(25.0, row_height), |ui| {
-                            ui.centered_and_justified(|ui| {
-                                ui.label(egui::RichText::new(axis.axis_name).strong().size(10.0));
-                            });
-                        });
-                        // Plot takes the rest
-                        ui.vertical(|ui| {
-                            axis.show(ui, domain, total_width - 25.0);
-                        });
-                    },
-                );
+                let row_rect = ui
+                    .allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), row_height),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            // Plot takes the full width
+                            axis.show(ui, domain);
+                        },
+                    )
+                    .response
+                    .rect;
+
+                // Show axis label as overlay on top of the plot (after plot is rendered)
+                if show_labels {
+                    let label_rect = egui::Rect::from_min_size(
+                        row_rect.min + egui::vec2(5.0, 0.0),
+                        egui::vec2(30.0, row_height),
+                    );
+                    // Use a foreground layer to ensure label is on top
+                    let painter = ui.painter_at(row_rect);
+                    painter.text(
+                        label_rect.center(),
+                        egui::Align2::CENTER_CENTER,
+                        axis.axis_name,
+                        egui::FontId::proportional(11.0),
+                        egui::Color32::WHITE,
+                    );
+                }
             }
         })
         .response
@@ -826,7 +829,6 @@ impl VibeTab {
         let old_fft_settings = self.fft_settings.clone();
         let old_preset = self.current_preset;
         let fft_size = self.fft_settings.size;
-        let total_width = ui.available_width();
         let sample_rate = self.fd.sample_rate() as f32;
         let nyquist = sample_rate / 2.0;
 
@@ -977,34 +979,56 @@ impl VibeTab {
 
         ui.separator();
 
+        // Determine the first enabled column to show axis labels only there
+        let first_enabled = if self.gyro_raw_enabled {
+            0
+        } else if self.gyro_filtered_enabled {
+            1
+        } else if self.dterm_raw_enabled {
+            2
+        } else if self.dterm_filtered_enabled {
+            3
+        } else if self.setpoint_enabled {
+            4
+        } else if self.pid_error_enabled {
+            5
+        } else if self.pid_sum_enabled {
+            6
+        } else {
+            usize::MAX // No columns enabled
+        };
+
         FlexColumns::new(MIN_WIDE_WIDTH)
             .column_enabled(self.gyro_raw_enabled, |ui| {
                 ui.heading("Gyro (raw)");
-                self.gyro_raw_ffts.show(ui, self.domain, total_width)
+                self.gyro_raw_ffts.show(ui, self.domain, first_enabled == 0)
             })
             .column_enabled(self.gyro_filtered_enabled, |ui| {
                 ui.heading("Gyro (filtered)");
-                self.gyro_filtered_ffts.show(ui, self.domain, total_width)
+                self.gyro_filtered_ffts
+                    .show(ui, self.domain, first_enabled == 1)
             })
             .column_enabled(self.dterm_raw_enabled, |ui| {
                 ui.heading("D Term (raw)")
-                //self.dterm_raw_ffts.show(ui, self.domain, total_width)
+                //self.dterm_raw_ffts.show(ui, self.domain, first_enabled == 2)
             })
             .column_enabled(self.dterm_filtered_enabled, |ui| {
                 ui.heading("D Term (filtered)");
-                self.dterm_filtered_ffts.show(ui, self.domain, total_width)
+                self.dterm_filtered_ffts
+                    .show(ui, self.domain, first_enabled == 3)
             })
             .column_enabled(self.setpoint_enabled, |ui| {
                 ui.heading("Setpoint");
-                self.setpoint_ffts.show(ui, self.domain, total_width)
+                self.setpoint_ffts.show(ui, self.domain, first_enabled == 4)
             })
             .column_enabled(self.pid_error_enabled, |ui| {
                 ui.heading("PID Error");
-                self.pid_error_ffts.show(ui, self.domain, total_width)
+                self.pid_error_ffts
+                    .show(ui, self.domain, first_enabled == 5)
             })
             .column_enabled(self.pid_sum_enabled, |ui| {
                 ui.heading("PID Sum");
-                self.pid_sum_ffts.show(ui, self.domain, total_width)
+                self.pid_sum_ffts.show(ui, self.domain, first_enabled == 6)
             })
             .show(ui);
     }
