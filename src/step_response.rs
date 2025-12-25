@@ -8,14 +8,18 @@ fn fft_forward(data: &[f32]) -> Vec<Complex32> {
     output
 }
 
-fn fft_inverse(data: &[Complex32]) -> Vec<f32> {
+fn fft_inverse(data: &[Complex32], original_len: usize) -> Vec<f32> {
+    if data.is_empty() || original_len == 0 {
+        return vec![];
+    }
     let mut input = data.to_vec();
-    let planner = realfft::RealFftPlanner::<f32>::new().plan_fft_inverse(input.len() * 2 - 1);
+    // Use the original signal length for inverse FFT planning
+    let planner = realfft::RealFftPlanner::<f32>::new().plan_fft_inverse(original_len);
     let mut output = planner.make_output_vec();
     if planner.process(&mut input, &mut output).is_ok() {
         output
     } else {
-        vec![0.0; input.len()]
+        vec![0.0; original_len]
     }
 }
 
@@ -84,6 +88,112 @@ fn apply_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
     smoothed
 }
 
+/// Extracted metrics from a step response curve
+#[derive(Clone, Copy, Debug, Default)]
+pub struct StepResponseMetrics {
+    /// Time to reach 90% of steady-state value (ms)
+    pub rise_time_ms: f32,
+    /// Time to stay within 2% of final value (ms)
+    pub settling_time_ms: f32,
+    /// Maximum overshoot as percentage (e.g., 15.0 = 15% overshoot)
+    pub overshoot_pct: f32,
+    /// Maximum undershoot as percentage
+    pub undershoot_pct: f32,
+    /// Final steady-state error from 1.0 (ideal)
+    pub steady_state_error: f32,
+    /// Whether oscillations are present after settling
+    pub has_oscillations: bool,
+    /// Peak response time (time to reach maximum value, ms)
+    pub peak_time_ms: f32,
+}
+
+impl StepResponseMetrics {
+    /// Analyze a step response curve and extract metrics
+    /// The response should be normalized so steady-state = 1.0
+    pub fn analyze(response: &[(f64, f64)]) -> Self {
+        if response.is_empty() {
+            return Self::default();
+        }
+
+        let mut metrics = Self::default();
+
+        // Find peak value and time
+        let (peak_time, peak_value) = response
+            .iter()
+            .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
+            .copied()
+            .unwrap_or((0.0, 0.0));
+
+        metrics.peak_time_ms = peak_time as f32;
+
+        // Calculate overshoot (max above 1.0)
+        let max_value = response.iter().map(|(_, y)| *y).fold(0.0f64, f64::max);
+        if max_value > 1.0 {
+            metrics.overshoot_pct = ((max_value - 1.0) * 100.0) as f32;
+        }
+
+        // Calculate undershoot (within first 100ms, how far below 1.0)
+        let first_100ms: Vec<_> = response.iter().filter(|(t, _)| *t <= 100.0).collect();
+        if !first_100ms.is_empty() {
+            let min_early = first_100ms.iter().map(|(_, y)| *y).fold(f64::MAX, f64::min);
+            if min_early < 1.0 && min_early > 0.0 {
+                metrics.undershoot_pct = ((1.0 - min_early) * 100.0) as f32;
+            }
+        }
+
+        // Calculate rise time (time to reach 90% of steady-state)
+        for (t, y) in response {
+            if *y >= 0.9 {
+                metrics.rise_time_ms = *t as f32;
+                break;
+            }
+        }
+
+        // Calculate settling time (time to stay within 2% of final value)
+        let tolerance = 0.02;
+        let mut settled_idx = None;
+        for (i, (_, y)) in response.iter().enumerate().rev() {
+            if (*y - 1.0).abs() > tolerance {
+                settled_idx = Some(i);
+                break;
+            }
+        }
+        if let Some(idx) = settled_idx {
+            if idx + 1 < response.len() {
+                metrics.settling_time_ms = response[idx + 1].0 as f32;
+            }
+        }
+
+        // Calculate steady-state error (average of last 20% of response)
+        let tail_start = (response.len() as f64 * 0.8) as usize;
+        if tail_start < response.len() {
+            let tail_values: Vec<f64> = response[tail_start..].iter().map(|(_, y)| *y).collect();
+            let avg = tail_values.iter().sum::<f64>() / tail_values.len() as f64;
+            metrics.steady_state_error = (avg - 1.0).abs() as f32;
+        }
+
+        // Check for oscillations (does the response cross 1.0 multiple times after peak?)
+        let mut crossings = 0;
+        let peak_idx = response
+            .iter()
+            .position(|(t, _)| *t >= peak_time as f64)
+            .unwrap_or(0);
+        if peak_idx + 1 < response.len() {
+            let mut was_above = response[peak_idx].1 > 1.0;
+            for (_, y) in &response[peak_idx..] {
+                let is_above = *y > 1.0;
+                if is_above != was_above {
+                    crossings += 1;
+                    was_above = is_above;
+                }
+            }
+        }
+        metrics.has_oscillations = crossings >= 3;
+
+        metrics
+    }
+}
+
 /// Configuration for step response calculation
 #[derive(Clone, Copy, Debug)]
 pub struct StepResponseConfig {
@@ -119,18 +229,34 @@ pub fn calculate_step_response(
     let output_spectrum = fft_forward(gyro_filtered);
 
     let input_spec_conj: Vec<_> = input_spectrum.iter().map(|c| c.conj()).collect();
+
+    // Epsilon threshold to prevent division by near-zero values (prevents NaN/infinity)
+    const EPSILON: f32 = 1e-10;
+
     let frequency_response: Vec<_> = input_spectrum
         .iter()
         .zip(output_spectrum.iter())
         .zip(input_spec_conj.iter())
-        .map(|((i, o), i_conj)| (i_conj * o) / (i_conj * i))
+        .map(|((i, o), i_conj)| {
+            let denominator = i_conj * i;
+            if denominator.norm() < EPSILON {
+                Complex32::new(0.0, 0.0)
+            } else {
+                (i_conj * o) / denominator
+            }
+        })
         .collect();
 
-    let impulse_response = fft_inverse(&frequency_response);
+    let impulse_response = fft_inverse(&frequency_response, setpoint.len());
+
+    // Calculate step response with NaN filtering
     let step_response: Vec<_> = impulse_response
         .iter()
-        .scan(0.0, |cum_sum, x| {
-            *cum_sum += *x;
+        .scan(0.0f32, |cum_sum, x| {
+            // Skip NaN or infinite values to prevent propagation
+            if x.is_finite() {
+                *cum_sum += *x;
+            }
             Some(*cum_sum)
         })
         .collect();

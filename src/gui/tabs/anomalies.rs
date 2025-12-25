@@ -38,6 +38,11 @@ pub enum AnomalyType {
     HighVibration,
     RadioFailsafe,
     GyroNoiseSpike,
+    // New anomaly types
+    BatteryVoltageSag,
+    PropWash,
+    MotorImbalance,
+    ITermWindup,
 }
 
 impl AnomalyType {
@@ -49,6 +54,11 @@ impl AnomalyType {
             Self::HighVibration => Color32::from_rgb(255, 100, 255), // Magenta
             Self::RadioFailsafe => Color32::from_rgb(255, 0, 0),     // Red
             Self::GyroNoiseSpike => Color32::from_rgb(0, 255, 255),  // Cyan
+            // New colors
+            Self::BatteryVoltageSag => Color32::from_rgb(255, 80, 80), // Light red
+            Self::PropWash => Color32::from_rgb(180, 100, 255),        // Purple
+            Self::MotorImbalance => Color32::from_rgb(255, 200, 100),  // Light orange
+            Self::ITermWindup => Color32::from_rgb(100, 200, 255),     // Light blue
         }
     }
 
@@ -60,6 +70,11 @@ impl AnomalyType {
             Self::HighVibration => "High Vibration Event",
             Self::RadioFailsafe => "Radio Failsafe / Signal Loss",
             Self::GyroNoiseSpike => "Gyro Noise Spike",
+            // New labels
+            Self::BatteryVoltageSag => "Battery Voltage Sag",
+            Self::PropWash => "Propwash Oscillation",
+            Self::MotorImbalance => "Motor Output Imbalance",
+            Self::ITermWindup => "I-Term Windup",
         }
     }
 }
@@ -194,6 +209,175 @@ impl AnomalyDetector {
                         });
                     }
                     start_idx = None;
+                }
+            }
+        }
+
+        // 4. Detect Battery Voltage Sag (sudden drops)
+        if let Some(voltage) = fd.battery_voltage() {
+            if voltage.len() > 100 {
+                let mut start_idx = None;
+                for i in 10..voltage.len() {
+                    // Check for >0.5V drop in last 10 samples
+                    let current = voltage[i];
+                    let recent_max = voltage[i.saturating_sub(10)..i]
+                        .iter()
+                        .cloned()
+                        .fold(0.0f32, f32::max);
+
+                    let drop = recent_max - current;
+                    if drop > 0.5 && current > 10.0 {
+                        // >0.5V sag, battery > 10V (not noise)
+                        if start_idx.is_none() {
+                            start_idx = Some(i);
+                        }
+                    } else if let Some(start) = start_idx {
+                        if (times[i] - times[start]).abs() > 0.05 {
+                            events.push(AnomalyEvent {
+                                start_idx: start,
+                                end_idx: i,
+                                start_time: times[start],
+                                end_time: times[i],
+                                anomaly_type: AnomalyType::BatteryVoltageSag,
+                                description: format!(
+                                    "Voltage sag detected ({:.1}V drop)",
+                                    recent_max - current
+                                ),
+                                severity: 0.6,
+                            });
+                        }
+                        start_idx = None;
+                    }
+                }
+            }
+        }
+
+        // 5. Detect Propwash (oscillations during descent / low throttle with high gyro activity)
+        if let (Some(motors), Some(gyro)) = (fd.motor(), fd.gyro_filtered()) {
+            if motors.len() >= 4 && !motors[0].is_empty() {
+                let mut start_idx = None;
+                for i in 20..count.min(motors[0].len()).min(gyro[0].len()) {
+                    // Calculate average throttle (normalized)
+                    let avg_motor: f32 = motors.iter().filter_map(|m| m.get(i)).sum::<f32>() / 4.0;
+                    let throttle_pct = avg_motor / 20.0; // Rough % for DShot
+
+                    // Check for low/descending throttle with oscillating gyro
+                    let is_low_throttle = throttle_pct < 40.0;
+
+                    // Gyro oscillation: check variance in recent samples
+                    let window_start = i.saturating_sub(20);
+                    let gyro_window: Vec<f32> = gyro[0][window_start..i].to_vec();
+                    if gyro_window.len() >= 10 {
+                        let mean: f32 = gyro_window.iter().sum::<f32>() / gyro_window.len() as f32;
+                        let variance: f32 =
+                            gyro_window.iter().map(|v| (v - mean).powi(2)).sum::<f32>()
+                                / gyro_window.len() as f32;
+                        let std_dev = variance.sqrt();
+
+                        let is_oscillating = std_dev > 150.0; // High gyro variance
+
+                        if is_low_throttle && is_oscillating {
+                            if start_idx.is_none() {
+                                start_idx = Some(i);
+                            }
+                        } else if let Some(start) = start_idx {
+                            if (times[i] - times[start]).abs() > 0.1 {
+                                events.push(AnomalyEvent {
+                                    start_idx: start,
+                                    end_idx: i,
+                                    start_time: times[start],
+                                    end_time: times[i],
+                                    anomaly_type: AnomalyType::PropWash,
+                                    description: "Propwash oscillation during descent".to_string(),
+                                    severity: 0.5,
+                                });
+                            }
+                            start_idx = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 6. Detect Motor Imbalance (large difference between motor outputs)
+        if let Some(motors) = fd.motor() {
+            if motors.len() >= 4 {
+                let mut start_idx = None;
+                for i in 0..count.min(motors[0].len()) {
+                    let motor_vals: Vec<f32> =
+                        motors.iter().filter_map(|m| m.get(i).copied()).collect();
+
+                    if motor_vals.len() == 4 {
+                        let max = motor_vals.iter().cloned().fold(f32::MIN, f32::max);
+                        let min = motor_vals.iter().cloned().fold(f32::MAX, f32::min);
+                        let avg = motor_vals.iter().sum::<f32>() / 4.0;
+
+                        // Significant imbalance: >30% difference when not at idle
+                        let diff_pct = if avg > 200.0 {
+                            (max - min) / avg * 100.0
+                        } else {
+                            0.0
+                        };
+
+                        if diff_pct > 30.0 {
+                            if start_idx.is_none() {
+                                start_idx = Some(i);
+                            }
+                        } else if let Some(start) = start_idx {
+                            if (times[i] - times[start]).abs() > 0.2 {
+                                events.push(AnomalyEvent {
+                                    start_idx: start,
+                                    end_idx: i,
+                                    start_time: times[start],
+                                    end_time: times[i],
+                                    anomaly_type: AnomalyType::MotorImbalance,
+                                    description: format!(
+                                        "Motor outputs differ by >{:.0}%",
+                                        diff_pct
+                                    ),
+                                    severity: 0.6,
+                                });
+                            }
+                            start_idx = None;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 7. Detect I-Term Windup (I-term growing while gyro error persists)
+        if let Some(i_terms) = fd.i() {
+            for axis in 0..3 {
+                let i_data = &i_terms[axis];
+                if i_data.len() > 50 {
+                    let mut start_idx = None;
+                    for i in 50..i_data.len() {
+                        // Check if I-term is growing significantly
+                        let current_i = i_data[i].abs();
+                        let prev_i = i_data[i.saturating_sub(50)].abs();
+
+                        let i_growing = current_i > prev_i * 1.5 && current_i > 200.0;
+
+                        if i_growing {
+                            if start_idx.is_none() {
+                                start_idx = Some(i);
+                            }
+                        } else if let Some(start) = start_idx {
+                            if (times[i] - times[start]).abs() > 0.3 {
+                                let axis_name = ["Roll", "Pitch", "Yaw"][axis];
+                                events.push(AnomalyEvent {
+                                    start_idx: start,
+                                    end_idx: i,
+                                    start_time: times[start],
+                                    end_time: times[i],
+                                    anomaly_type: AnomalyType::ITermWindup,
+                                    description: format!("{} I-term accumulating", axis_name),
+                                    severity: 0.5,
+                                });
+                            }
+                            start_idx = None;
+                        }
+                    }
                 }
             }
         }

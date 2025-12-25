@@ -201,6 +201,122 @@ impl NoiseAnalysis {
     }
 }
 
+/// Filter effectiveness scoring with letter grades
+#[derive(Clone, Default)]
+pub struct FilterEffectivenessScore {
+    /// Overall score (0-100)
+    pub overall_score: f32,
+    /// Letter grade (A+, A, B, C, D, F)
+    pub grade: String,
+    /// Color for the grade
+    pub grade_color: Color32,
+    /// Individual component scores
+    pub gyro_filtering_score: f32,
+    pub dterm_noise_score: f32,
+    pub config_quality_score: f32,
+    /// Detailed breakdown
+    pub summary: String,
+}
+
+impl FilterEffectivenessScore {
+    /// Calculate comprehensive filter effectiveness score
+    pub fn compute(noise: &NoiseAnalysis, settings: &FilterSettings) -> Self {
+        let mut score = Self::default();
+        
+        // 1. Gyro filtering score (40% weight) - based on noise reduction
+        let avg_reduction = (noise.noise_reduction_pct[0] + noise.noise_reduction_pct[1] + noise.noise_reduction_pct[2]) / 3.0;
+        score.gyro_filtering_score = (avg_reduction).clamp(0.0, 100.0);
+        
+        // 2. D-term noise score (30% weight) - lower is better
+        let avg_dterm_noise = (noise.dterm_noise_rms[0] + noise.dterm_noise_rms[1]) / 2.0;
+        // Good D-term noise is < 10, bad is > 50
+        score.dterm_noise_score = (100.0 - (avg_dterm_noise - 10.0).max(0.0) * 2.0).clamp(0.0, 100.0);
+        
+        // 3. Config quality score (30% weight) - based on settings
+        let mut config_points = 0.0;
+        let mut config_max = 0.0;
+        
+        // RPM filter enabled (+25 points)
+        config_max += 25.0;
+        if settings.rpm_filter_enabled() {
+            config_points += 25.0;
+        }
+        
+        // Dynamic gyro LPF (+15 points)
+        config_max += 15.0;
+        if settings.gyro_dyn_lpf_enabled() {
+            config_points += 15.0;
+        }
+        
+        // Dynamic D-term LPF (+15 points)
+        config_max += 15.0;
+        if settings.dterm_dyn_lpf_enabled() {
+            config_points += 15.0;
+        }
+        
+        // Gyro LPF2 for extra filtering (+10 points)
+        config_max += 10.0;
+        if settings.gyro_lpf2_hz > 0.0 {
+            config_points += 10.0;
+        }
+        
+        // D-term LPF2 (+10 points)
+        config_max += 10.0;
+        if settings.dterm_lpf2_hz > 0.0 {
+            config_points += 10.0;
+        }
+        
+        // Reasonable LPF1 frequency (not too aggressive, 150-400Hz is good) (+15 points)
+        config_max += 15.0;
+        if settings.gyro_lpf1_hz >= 100.0 && settings.gyro_lpf1_hz <= 500.0 {
+            config_points += 15.0;
+        } else if settings.gyro_lpf1_hz > 0.0 {
+            config_points += 5.0; // Some filter is better than none
+        }
+        
+        // Notch filters configured (+10 points)
+        config_max += 10.0;
+        if settings.gyro_notch1_hz > 0.0 || settings.gyro_notch2_hz > 0.0 {
+            config_points += 10.0;
+        }
+        
+        score.config_quality_score = if config_max > 0.0 {
+            (config_points / config_max) * 100.0
+        } else {
+            50.0
+        };
+        
+        // Calculate overall score (weighted average)
+        score.overall_score = 
+            score.gyro_filtering_score * 0.40 +
+            score.dterm_noise_score * 0.30 +
+            score.config_quality_score * 0.30;
+        
+        // Assign letter grade
+        (score.grade, score.grade_color) = match score.overall_score as i32 {
+            95..=100 => ("A+".to_string(), Color32::from_rgb(0, 255, 100)),
+            85..=94 => ("A".to_string(), Color32::from_rgb(100, 255, 100)),
+            75..=84 => ("B".to_string(), Color32::from_rgb(180, 255, 100)),
+            65..=74 => ("C".to_string(), Color32::from_rgb(255, 255, 100)),
+            50..=64 => ("D".to_string(), Color32::from_rgb(255, 180, 100)),
+            _ => ("F".to_string(), Color32::from_rgb(255, 100, 100)),
+        };
+        
+        // Generate summary
+        score.summary = if score.overall_score >= 85.0 {
+            "Excellent filter configuration. Noise is well controlled.".to_string()
+        } else if score.overall_score >= 70.0 {
+            "Good filtering. Minor optimizations possible.".to_string()
+        } else if score.overall_score >= 55.0 {
+            "Moderate filtering. Consider enabling RPM filter or dynamic LPF.".to_string()
+        } else {
+            "Poor filtering. Significant noise getting through. Review filter setup.".to_string()
+        };
+        
+        score
+    }
+}
+
 /// Motor RPM data for harmonic visualization
 #[allow(dead_code)]
 struct MotorRpmData {
@@ -599,38 +715,96 @@ impl FilterTab {
     }
     
     fn show_filter_effectiveness(&self, ui: &mut egui::Ui, colors: &Colors) -> egui::Response {
+        // Compute the comprehensive effectiveness score
+        let score = FilterEffectivenessScore::compute(&self.noise_analysis, &self.filter_settings);
+        
         ui.vertical(|ui| {
-            ui.label(RichText::new("Filter Effectiveness").strong());
+            // Header with large letter grade
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Filter Effectiveness").strong().size(16.0));
+                ui.add_space(16.0);
+                ui.label(
+                    RichText::new(&score.grade)
+                        .color(score.grade_color)
+                        .strong()
+                        .size(28.0)
+                );
+                ui.label(
+                    RichText::new(format!(" ({:.0}/100)", score.overall_score))
+                        .weak()
+                        .size(14.0)
+                );
+            });
+            
+            ui.add_space(4.0);
+            ui.label(RichText::new(&score.summary).weak().italics());
+            ui.add_space(8.0);
+            
+            // Score breakdown
+            ui.label(RichText::new("Score Breakdown").strong());
             ui.add_space(4.0);
             
-            // Noise reduction bar chart
-            let axis_names = ["Roll", "Pitch", "Yaw"];
-            
-            for (i, name) in axis_names.iter().enumerate() {
-                let reduction = self.noise_analysis.noise_reduction_pct[i].clamp(0.0, 100.0);
-                let bar_width = (reduction / 100.0) * 150.0;
-                
+            // Helper to draw a mini progress bar
+            let draw_score_bar = |ui: &mut egui::Ui, label: &str, value: f32, tooltip: &str| {
                 ui.horizontal(|ui| {
-                    ui.label(format!("{:5}", name));
+                    ui.label(format!("{:18}", label));
                     
-                    // Draw bar
-                    let (rect, _response) = ui.allocate_exact_size(
-                        egui::Vec2::new(160.0, 16.0),
+                    let (rect, response) = ui.allocate_exact_size(
+                        egui::Vec2::new(100.0, 12.0),
                         egui::Sense::hover(),
                     );
                     
                     // Background
-                    ui.painter().rect_filled(
-                        rect,
-                        2.0,
-                        Color32::from_gray(40),
-                    );
+                    ui.painter().rect_filled(rect, 2.0, Color32::from_gray(40));
                     
                     // Bar
-                    let bar_rect = egui::Rect::from_min_size(
-                        rect.min,
-                        egui::Vec2::new(bar_width, 16.0),
+                    let bar_width = (value / 100.0).clamp(0.0, 1.0) * 100.0;
+                    let bar_rect = egui::Rect::from_min_size(rect.min, egui::Vec2::new(bar_width, 12.0));
+                    
+                    let bar_color = if value >= 75.0 {
+                        Color32::from_rgb(100, 255, 100)
+                    } else if value >= 50.0 {
+                        Color32::from_rgb(255, 255, 100)
+                    } else {
+                        Color32::from_rgb(255, 100, 100)
+                    };
+                    
+                    ui.painter().rect_filled(bar_rect, 2.0, bar_color);
+                    
+                    ui.add_space(8.0);
+                    ui.label(format!("{:.0}%", value));
+                    
+                    response.on_hover_text(tooltip);
+                });
+            };
+            
+            draw_score_bar(ui, "Gyro Filtering:", score.gyro_filtering_score, "Noise reduction from raw to filtered gyro");
+            draw_score_bar(ui, "D-Term Noise:", score.dterm_noise_score, "D-term noise level (lower noise = higher score)");
+            draw_score_bar(ui, "Config Quality:", score.config_quality_score, "Filter configuration (RPM filter, dynamic LPF, etc.)");
+            
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            
+            // Noise reduction per axis
+            ui.label(RichText::new("Per-Axis Noise Reduction").strong());
+            let axis_names = ["Roll", "Pitch", "Yaw"];
+            
+            for (i, name) in axis_names.iter().enumerate() {
+                let reduction = self.noise_analysis.noise_reduction_pct[i].clamp(0.0, 100.0);
+                let bar_width = (reduction / 100.0) * 120.0;
+                
+                ui.horizontal(|ui| {
+                    ui.label(format!("{:5}", name));
+                    
+                    let (rect, _response) = ui.allocate_exact_size(
+                        egui::Vec2::new(130.0, 14.0),
+                        egui::Sense::hover(),
                     );
+                    
+                    ui.painter().rect_filled(rect, 2.0, Color32::from_gray(40));
+                    
+                    let bar_rect = egui::Rect::from_min_size(rect.min, egui::Vec2::new(bar_width, 14.0));
                     
                     let color = if reduction > 70.0 {
                         colors.triple_primary[i]
@@ -641,8 +815,6 @@ impl FilterTab {
                     };
                     
                     ui.painter().rect_filled(bar_rect, 2.0, color);
-                    
-                    // Label
                     ui.painter().text(
                         rect.center(),
                         egui::Align2::CENTER_CENTER,
@@ -652,25 +824,6 @@ impl FilterTab {
                     );
                 });
             }
-            
-            ui.add_space(8.0);
-            
-            // Overall assessment
-            let avg_reduction: f32 = self.noise_analysis.noise_reduction_pct.iter().sum::<f32>() / 3.0;
-            
-            ui.horizontal(|ui| {
-                ui.label("Overall:");
-                let (assessment, color) = if avg_reduction > 75.0 {
-                    ("Excellent filtering", Color32::GREEN)
-                } else if avg_reduction > 60.0 {
-                    ("Good filtering", Color32::LIGHT_GREEN)
-                } else if avg_reduction > 45.0 {
-                    ("Moderate filtering", Color32::YELLOW)
-                } else {
-                    ("Poor filtering - consider adjustments", Color32::RED)
-                };
-                ui.colored_label(color, assessment);
-            });
         })
         .response
     }

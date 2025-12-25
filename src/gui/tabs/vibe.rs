@@ -29,6 +29,22 @@ enum Colorscheme {
     Viridis,
     #[default]
     Inferno,
+    Magma,
+    Plasma,
+    Cividis,
+    Spectral,
+}
+
+impl Colorscheme {
+    const ALL: [Colorscheme; 7] = [
+        Colorscheme::Turbo,
+        Colorscheme::Viridis,
+        Colorscheme::Inferno,
+        Colorscheme::Magma,
+        Colorscheme::Plasma,
+        Colorscheme::Cividis,
+        Colorscheme::Spectral,
+    ];
 }
 
 impl From<Colorscheme> for colorgrad::Gradient {
@@ -37,6 +53,52 @@ impl From<Colorscheme> for colorgrad::Gradient {
             Colorscheme::Turbo => colorgrad::turbo(),
             Colorscheme::Viridis => colorgrad::viridis(),
             Colorscheme::Inferno => colorgrad::inferno(),
+            Colorscheme::Magma => colorgrad::magma(),
+            Colorscheme::Plasma => colorgrad::plasma(),
+            Colorscheme::Cividis => colorgrad::cividis(),
+            Colorscheme::Spectral => colorgrad::spectral(),
+        }
+    }
+}
+
+/// Frequency band overlay for highlighting specific frequency ranges
+#[derive(Clone, PartialEq)]
+struct FrequencyBand {
+    pub enabled: bool,
+    pub name: String,
+    pub min_hz: f32,
+    pub max_hz: f32,
+    pub color: Color32,
+}
+
+impl FrequencyBand {
+    fn new(name: &str, min_hz: f32, max_hz: f32, color: Color32) -> Self {
+        Self {
+            enabled: false,
+            name: name.to_string(),
+            min_hz,
+            max_hz,
+            color,
+        }
+    }
+}
+
+/// Analysis preset for quick configuration
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum AnalysisPreset {
+    Custom,
+    MotorTuning,
+    PropWash,
+    FullSpectrum,
+}
+
+impl std::fmt::Display for AnalysisPreset {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AnalysisPreset::Custom => write!(f, "Custom"),
+            AnalysisPreset::MotorTuning => write!(f, "🔧 Motor Tuning"),
+            AnalysisPreset::PropWash => write!(f, "💨 Prop Wash"),
+            AnalysisPreset::FullSpectrum => write!(f, "📊 Full Spectrum"),
         }
     }
 }
@@ -47,6 +109,7 @@ struct FftSettings {
     pub step_size: usize,
     pub plot_colorscheme: Colorscheme,
     pub plot_max: f32,
+    pub auto_scale: bool,
     color_lookup_table: Option<(Colorscheme, [Color32; COLORGRAD_LOOKUP_SIZE])>,
 }
 
@@ -88,6 +151,7 @@ impl FftSettings {
         self.needs_recalculating(other)
             || self.plot_colorscheme != other.plot_colorscheme
             || self.plot_max != other.plot_max
+            || self.auto_scale != other.auto_scale
     }
 }
 
@@ -98,6 +162,7 @@ impl Default for FftSettings {
             step_size: 8,
             plot_colorscheme: Colorscheme::default(),
             plot_max: 10.0,
+            auto_scale: false,
             color_lookup_table: None,
         }
     }
@@ -160,11 +225,14 @@ impl FftChunk {
 
 type FftAxisValueCallback = Box<fn(&FlightData) -> [Option<&Vec<f32>>; 3]>;
 
+const AXIS_NAMES: [&str; 3] = ["Roll", "Pitch", "Yaw"];
+
 struct FftAxis {
     ctx: egui::Context,
     fft_settings: FftSettings,
 
     i: usize,
+    axis_name: &'static str,
     flight_data: Arc<FlightData>,
     value_callback: FftAxisValueCallback,
 
@@ -174,6 +242,7 @@ struct FftAxis {
     time_texture_receiver: Option<Receiver<(f64, f64, egui::TextureHandle)>>,
     throttle_texture: Option<egui::TextureHandle>,
     throttle_texture_receiver: Option<Receiver<egui::TextureHandle>>,
+    peak_frequency_hz: Option<f32>,
 }
 
 impl FftAxis {
@@ -189,6 +258,7 @@ impl FftAxis {
             fft_settings,
 
             i,
+            axis_name: AXIS_NAMES[i],
             flight_data,
             value_callback: Box::new(value_callback),
 
@@ -198,6 +268,7 @@ impl FftAxis {
             time_texture_receiver: None,
             throttle_texture: None,
             throttle_texture_receiver: None,
+            peak_frequency_hz: None,
         };
         new.recalculate_ffts();
         new
@@ -454,8 +525,8 @@ impl FftAxis {
             .legend(egui_plot::Legend::default())
             .set_margin_fraction(egui::Vec2::new(0.0, 0.0))
             .show_grid(false)
-            .allow_drag(false)
-            .allow_zoom(false)
+            .allow_drag([true, false])
+            .allow_zoom([true, false])
             .allow_scroll(false)
             .include_y(0.0)
             .include_y(1.0)
@@ -535,12 +606,26 @@ impl FftVectorSeries {
         domain: VibeDomain,
         total_width: f32,
     ) -> egui::Response {
+        let available_height = ui.available_height();
+        let row_height = available_height / 3.0;
         ui.vertical(|ui| {
-            for (i, axis) in self.axes.iter_mut().enumerate() {
-                ui.vertical(|ui| {
-                    ui.set_height(ui.available_height() / (3 - i) as f32);
-                    axis.show(ui, domain, total_width);
-                });
+            for axis in self.axes.iter_mut() {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), row_height),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        // Add axis label on the left (narrow column)
+                        ui.allocate_ui(egui::vec2(25.0, row_height), |ui| {
+                            ui.centered_and_justified(|ui| {
+                                ui.label(egui::RichText::new(axis.axis_name).strong().size(10.0));
+                            });
+                        });
+                        // Plot takes the rest
+                        ui.vertical(|ui| {
+                            axis.show(ui, domain, total_width - 25.0);
+                        });
+                    },
+                );
             }
         })
         .response
@@ -560,6 +645,14 @@ pub struct VibeTab {
 
     fft_settings: FftSettings,
     max_freq_hz: f32,
+    current_preset: AnalysisPreset,
+    #[allow(dead_code)]
+    show_peak_frequencies: bool,
+    #[allow(dead_code)]
+    show_axis_labels: bool,
+
+    // Frequency band overlays
+    frequency_bands: Vec<FrequencyBand>,
 
     gyro_raw_ffts: FftVectorSeries,
     gyro_filtered_ffts: FftVectorSeries,
@@ -674,6 +767,32 @@ impl VibeTab {
 
             fft_settings,
             max_freq_hz: fd.sample_rate() as f32 / 2.0, // Nyquist
+            current_preset: AnalysisPreset::Custom,
+            show_peak_frequencies: false,
+            show_axis_labels: true,
+
+            // Initialize frequency bands with common ranges
+            frequency_bands: vec![
+                FrequencyBand::new(
+                    "Prop Wash",
+                    20.0,
+                    80.0,
+                    Color32::from_rgba_unmultiplied(255, 165, 0, 80),
+                ),
+                FrequencyBand::new(
+                    "Frame Resonance",
+                    80.0,
+                    150.0,
+                    Color32::from_rgba_unmultiplied(255, 0, 0, 80),
+                ),
+                FrequencyBand::new(
+                    "Motor Noise",
+                    150.0,
+                    300.0,
+                    Color32::from_rgba_unmultiplied(0, 255, 0, 80),
+                ),
+            ],
+
             gyro_raw_ffts,
             gyro_filtered_ffts,
             dterm_filtered_ffts,
@@ -705,17 +824,35 @@ impl VibeTab {
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let old_fft_settings = self.fft_settings.clone();
+        let old_preset = self.current_preset;
         let fft_size = self.fft_settings.size;
         let total_width = ui.available_width();
         let sample_rate = self.fd.sample_rate() as f32;
         let nyquist = sample_rate / 2.0;
 
-        FlexLayout::new(1500.0, "Settings")
+        FlexLayout::new(1200.0, "Settings")
             .add(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Domain:");
                     ui.selectable_value(&mut self.domain, VibeDomain::Time, "🕙 Time");
                     ui.selectable_value(&mut self.domain, VibeDomain::Throttle, "🏃 Throttle");
+                    ui.separator();
+                    ui.label("Presets:");
+                    ui.selectable_value(
+                        &mut self.current_preset,
+                        AnalysisPreset::MotorTuning,
+                        "🔧 Motor",
+                    );
+                    ui.selectable_value(
+                        &mut self.current_preset,
+                        AnalysisPreset::PropWash,
+                        "💨 Prop",
+                    );
+                    ui.selectable_value(
+                        &mut self.current_preset,
+                        AnalysisPreset::FullSpectrum,
+                        "📊 Full",
+                    );
                 })
                 .response
             })
@@ -723,24 +860,18 @@ impl VibeTab {
                 ui.horizontal(|ui| {
                     ui.label("Series:");
                     ui.toggle_value(&mut self.gyro_raw_enabled, "Gyro (raw)");
-                    ui.toggle_value(&mut self.gyro_filtered_enabled, "Gyro (filtered)");
-                    ui.toggle_value(&mut self.dterm_raw_enabled, "D term (raw)");
-                    ui.toggle_value(&mut self.dterm_filtered_enabled, "D term (filtered)");
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("More:");
+                    ui.toggle_value(&mut self.gyro_filtered_enabled, "Gyro (filt)");
+                    ui.toggle_value(&mut self.dterm_raw_enabled, "D (raw)");
+                    ui.toggle_value(&mut self.dterm_filtered_enabled, "D (filt)");
                     ui.toggle_value(&mut self.setpoint_enabled, "Setpoint");
-                    ui.toggle_value(&mut self.pid_error_enabled, "PID Error");
+                    ui.toggle_value(&mut self.pid_error_enabled, "PID Err");
                     ui.toggle_value(&mut self.pid_sum_enabled, "PID Sum");
                 })
                 .response
             })
             .add(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("FFT Size:");
+                    ui.label("FFT:");
                     for size in &FFT_SIZE_OPTIONS {
                         ui.selectable_value(
                             &mut self.fft_settings.size,
@@ -748,13 +879,9 @@ impl VibeTab {
                             format!("{}", size),
                         );
                     }
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("FFT Step Size:");
-                    for value in &[1, 8, 32, 128, 256, 512, 1024] {
+                    ui.separator();
+                    ui.label("Step:");
+                    for value in &[1, 8, 32, 128] {
                         ui.add_enabled_ui(*value <= fft_size, |ui| {
                             ui.selectable_value(
                                 &mut self.fft_settings.step_size,
@@ -768,53 +895,79 @@ impl VibeTab {
             })
             .add(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Max Freq (Hz):");
+                    ui.label("Freq:");
                     for freq in &[100.0_f32, 250.0, 500.0] {
                         let label = if *freq == 100.0 {
-                            "Sub-100".to_string()
+                            "<100".to_string()
                         } else {
-                            format!("{}Hz", freq)
+                            format!("{:.0}", freq)
                         };
                         ui.selectable_value(&mut self.max_freq_hz, *freq, &label);
                     }
-                    // Also add Nyquist option
                     ui.selectable_value(
                         &mut self.max_freq_hz,
                         nyquist,
-                        format!("Full ({:.0}Hz)", nyquist),
+                        format!("Full ({:.0})", nyquist),
                     );
+                    ui.separator();
+                    ui.label("Color:");
+                    egui::ComboBox::from_id_source("colorscheme")
+                        .selected_text(format!("{:?}", self.fft_settings.plot_colorscheme))
+                        .show_ui(ui, |ui| {
+                            for value in Colorscheme::ALL {
+                                ui.selectable_value(
+                                    &mut self.fft_settings.plot_colorscheme,
+                                    value,
+                                    format!("{:?}", value),
+                                );
+                            }
+                        });
                 })
                 .response
             })
             .add(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Colorscheme:");
-                    for value in &[
-                        Colorscheme::Turbo,
-                        Colorscheme::Viridis,
-                        Colorscheme::Inferno,
-                    ] {
-                        ui.selectable_value(
-                            &mut self.fft_settings.plot_colorscheme,
-                            *value,
-                            format!("{:?}", value),
-                        );
-                    }
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("FFTMax:");
+                    ui.label("Max:");
                     ui.add(
                         DragValue::new(&mut self.fft_settings.plot_max)
                             .clamp_range(0.0..=100.0)
                             .speed(0.01),
                     );
+                    ui.checkbox(&mut self.fft_settings.auto_scale, "Auto");
+                    ui.separator();
+                    ui.label("Overlays:");
+                    for band in &mut self.frequency_bands {
+                        ui.toggle_value(&mut band.enabled, &band.name);
+                    }
                 })
                 .response
             })
             .show(ui);
+
+        // Apply preset settings only when preset changes
+        if old_preset != self.current_preset {
+            match self.current_preset {
+                AnalysisPreset::MotorTuning => {
+                    self.max_freq_hz = 500.0;
+                    self.fft_settings.size = 512;
+                    self.fft_settings.step_size = 8;
+                }
+                AnalysisPreset::PropWash => {
+                    self.max_freq_hz = 100.0;
+                    self.fft_settings.size = 1024;
+                    self.fft_settings.step_size = 32;
+                }
+                AnalysisPreset::FullSpectrum => {
+                    self.max_freq_hz = nyquist;
+                    self.fft_settings.size = 256;
+                    self.fft_settings.step_size = 8;
+                }
+                AnalysisPreset::Custom => {}
+            }
+        } else if self.fft_settings != old_fft_settings {
+            // If user manually changed settings while on a preset, switch to Custom
+            self.current_preset = AnalysisPreset::Custom;
+        }
 
         if self.fft_settings != old_fft_settings {
             self.fft_settings.step_size =

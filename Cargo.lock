@@ -1023,7 +1023,6 @@ dependencies = [
 [[package]]
 name = "egui_oszi"
 version = "0.1.0"
-source = "git+https://github.com/dfsilva/egui_oszi#28f9069bb820ee6ac5e21105dbf12c22c4ac36b9"
 dependencies = [
  "eframe",
  "egui",

@@ -215,16 +215,20 @@ impl DashboardMetrics {
                     // Balance: measure variance between motors
                     let motor_avgs: Vec<f32> = motors
                         .iter()
+                        .filter(|m| !m.is_empty()) // Guard against empty motor data
                         .map(|m| m.iter().sum::<f32>() / m.len() as f32)
                         .collect();
-                    let avg_of_avgs = motor_avgs.iter().sum::<f32>() / motor_avgs.len() as f32;
-                    if avg_of_avgs > 0.0 {
-                        let variance = motor_avgs
-                            .iter()
-                            .map(|x| ((x - avg_of_avgs) / avg_of_avgs).powi(2))
-                            .sum::<f32>()
-                            / motor_avgs.len() as f32;
-                        balance = (100.0 - variance.sqrt() * 100.0).clamp(0.0, 100.0);
+
+                    if !motor_avgs.is_empty() {
+                        let avg_of_avgs = motor_avgs.iter().sum::<f32>() / motor_avgs.len() as f32;
+                        if avg_of_avgs > 0.0 {
+                            let variance = motor_avgs
+                                .iter()
+                                .map(|x| ((x - avg_of_avgs) / avg_of_avgs).powi(2))
+                                .sum::<f32>()
+                                / motor_avgs.len() as f32;
+                            balance = (100.0 - variance.sqrt() * 100.0).clamp(0.0, 100.0);
+                        }
                     }
                 }
             }
