@@ -1406,16 +1406,149 @@ impl SuggestionsTab {
     fn get_current_settings(fd: &FlightData) -> Option<String> {
         let headers = &fd.unknown_headers;
         
-        let roll_p = headers.get("rollPID").or_else(|| headers.get("pid[0][0]"));
-        let pitch_p = headers.get("pitchPID").or_else(|| headers.get("pid[1][0]"));
-        let yaw_p = headers.get("yawPID").or_else(|| headers.get("pid[2][0]"));
+        // Helper to get value or "N/A"
+        let get_or_na = |keys: &[&str]| -> String {
+            for key in keys {
+                if let Some(v) = headers.get(*key) {
+                    return v.clone();
+                }
+            }
+            "N/A".to_string()
+        };
         
-        if roll_p.is_some() || pitch_p.is_some() {
+        // Format anti-gravity with decimal (80 -> 8.0)
+        let format_anti_gravity = || -> String {
+            headers.get("anti_gravity_gain")
+                .and_then(|s| s.parse::<f32>().ok())
+                .map(|v| format!("{:.1}", v / 10.0))
+                .unwrap_or_else(|| "N/A".to_string())
+        };
+        
+        // ========== PIDs ==========
+        let roll_pid = get_or_na(&["rollPID"]);
+        let pitch_pid = get_or_na(&["pitchPID"]);
+        let yaw_pid = get_or_na(&["yawPID"]);
+        let d_min = get_or_na(&["d_min"]);
+        let ff_weight = get_or_na(&["ff_weight"]);
+        
+        // ========== PID Controller Settings ==========
+        let ff_jitter = get_or_na(&["feedforward_jitter_factor"]);
+        let ff_smooth = get_or_na(&["feedforward_smooth_factor"]);
+        let ff_averaging = get_or_na(&["feedforward_averaging"]);
+        let ff_boost = get_or_na(&["feedforward_boost"]);
+        let ff_max_rate = get_or_na(&["feedforward_max_rate_limit"]);
+        let ff_transition = get_or_na(&["feedforward_transition"]);
+        
+        let iterm_relax = get_or_na(&["iterm_relax"]);
+        let iterm_relax_type = get_or_na(&["iterm_relax_type"]);
+        let iterm_relax_cutoff = get_or_na(&["iterm_relax_cutoff"]);
+        let iterm_rotation = get_or_na(&["iterm_rotation"]);
+        
+        let anti_gravity = format_anti_gravity();
+        let d_max_gain = get_or_na(&["d_max_gain"]);
+        let d_max_advance = get_or_na(&["d_max_advance"]);
+        
+        let tpa_mode = get_or_na(&["tpa_mode"]);
+        let tpa_rate = get_or_na(&["tpa_rate"]);
+        let tpa_breakpoint = get_or_na(&["tpa_breakpoint"]);
+        
+        let throttle_boost = get_or_na(&["throttle_boost"]);
+        let motor_limit = get_or_na(&["motor_output_limit"]);
+        let dyn_idle = get_or_na(&["dyn_idle_min_rpm"]);
+        let vbat_sag = get_or_na(&["vbat_sag_compensation"]);
+        let thrust_linear = get_or_na(&["thrust_linear"]);
+        
+        let integrated_yaw = get_or_na(&["use_integrated_yaw"]);
+        let abs_control = get_or_na(&["abs_control_gain"]);
+        
+        // ========== Rates ==========
+        let rates_type = get_or_na(&["rates_type"]);
+        let rc_rates = get_or_na(&["rc_rates"]);
+        let rates = get_or_na(&["rates"]);
+        let rc_expo = get_or_na(&["rc_expo"]);
+        let throttle_limit = get_or_na(&["throttle_limit_percent"]);
+        
+        // ========== Gyro Filters ==========
+        let gyro_lpf1_static = get_or_na(&["gyro_lpf1_static_hz"]);
+        let gyro_lpf1_dyn_min = get_or_na(&["gyro_lpf1_dyn_min_hz"]);
+        let gyro_lpf1_dyn_max = get_or_na(&["gyro_lpf1_dyn_max_hz"]);
+        let gyro_lpf2_static = get_or_na(&["gyro_lpf2_static_hz"]);
+        let gyro_lpf2_type = get_or_na(&["gyro_lpf2_type"]);
+        
+        // ========== D-Term Filters ==========
+        let dterm_lpf1_static = get_or_na(&["dterm_lpf1_static_hz"]);
+        let dterm_lpf1_dyn_min = get_or_na(&["dterm_lpf1_dyn_min_hz"]);
+        let dterm_lpf1_dyn_max = get_or_na(&["dterm_lpf1_dyn_max_hz"]);
+        let dterm_lpf2_static = get_or_na(&["dterm_lpf2_static_hz"]);
+        let dterm_lpf2_type = get_or_na(&["dterm_lpf2_type"]);
+        let yaw_lpf = get_or_na(&["yaw_lowpass_hz"]);
+        
+        // ========== Dynamic Notch ==========
+        let dyn_notch_count = get_or_na(&["dyn_notch_count"]);
+        let dyn_notch_q = get_or_na(&["dyn_notch_q"]);
+        let dyn_notch_min = get_or_na(&["dyn_notch_min_hz"]);
+        let dyn_notch_max = get_or_na(&["dyn_notch_max_hz"]);
+        
+        // ========== RPM Filter ==========
+        let rpm_harmonics = get_or_na(&["rpm_filter_harmonics"]);
+        let rpm_min_hz = get_or_na(&["rpm_filter_min_hz"]);
+        
+        // ========== Filter Multipliers ==========
+        let gyro_filter_mult = get_or_na(&["simplified_gyro_filter_multiplier"]);
+        let dterm_filter_mult = get_or_na(&["simplified_dterm_filter_multiplier"]);
+        
+        if roll_pid != "N/A" || pitch_pid != "N/A" {
             Some(format!(
-                "Roll: {}, Pitch: {}, Yaw: {}",
-                roll_p.unwrap_or(&"N/A".to_string()),
-                pitch_p.unwrap_or(&"N/A".to_string()),
-                yaw_p.unwrap_or(&"N/A".to_string())
+                "══════════ PID SETTINGS ══════════\n\
+                 Roll PID: {}  |  Pitch PID: {}  |  Yaw PID: {}\n\
+                 D-Min: {}  |  FF Weight: {}\n\n\
+                 ══════════ FEEDFORWARD ══════════\n\
+                 Jitter: {} | Smooth: {} | Averaging: {} | Boost: {}\n\
+                 Max Rate Limit: {} | Transition: {}\n\n\
+                 ══════════ I-TERM ══════════\n\
+                 Relax: {} (Type={}, Cutoff={}) | Rotation: {}\n\n\
+                 ══════════ D-MAX & ANTI-GRAVITY ══════════\n\
+                 Anti-Gravity Gain: {} | D-Max Gain: {} | D-Max Advance: {}\n\n\
+                 ══════════ TPA ══════════\n\
+                 Mode: {} | Rate: {}% | Breakpoint: {}µs\n\n\
+                 ══════════ MOTOR & THROTTLE ══════════\n\
+                 Throttle Boost: {} | Motor Limit: {}% | Dynamic Idle: {} RPM\n\
+                 VBat Sag: {}% | Thrust Linear: {}%\n\
+                 Integrated Yaw: {} | Abs Control: {}\n\n\
+                 ══════════ RATES ══════════\n\
+                 Type: {} | RC Rates: {} | Rates: {} | Expo: {}\n\
+                 Throttle Limit: {}%\n\n\
+                 ══════════ GYRO FILTERS ══════════\n\
+                 LPF1 Static: {}Hz | Dynamic: {}-{}Hz\n\
+                 LPF2 Static: {}Hz (Type={})\n\
+                 Filter Multiplier: {}\n\n\
+                 ══════════ D-TERM FILTERS ══════════\n\
+                 LPF1 Static: {}Hz | Dynamic: {}-{}Hz\n\
+                 LPF2 Static: {}Hz (Type={}) | Yaw LPF: {}Hz\n\
+                 Filter Multiplier: {}\n\n\
+                 ══════════ NOTCH FILTERS ══════════\n\
+                 Dynamic Notch: Count={}, Q={}, Range={}-{}Hz\n\
+                 RPM Filter: {} harmonics, Min={}Hz",
+                roll_pid, pitch_pid, yaw_pid,
+                d_min, ff_weight,
+                ff_jitter, ff_smooth, ff_averaging, ff_boost,
+                ff_max_rate, ff_transition,
+                iterm_relax, iterm_relax_type, iterm_relax_cutoff, iterm_rotation,
+                anti_gravity, d_max_gain, d_max_advance,
+                tpa_mode, tpa_rate, tpa_breakpoint,
+                throttle_boost, motor_limit, dyn_idle,
+                vbat_sag, thrust_linear,
+                integrated_yaw, abs_control,
+                rates_type, rc_rates, rates, rc_expo,
+                throttle_limit,
+                gyro_lpf1_static, gyro_lpf1_dyn_min, gyro_lpf1_dyn_max,
+                gyro_lpf2_static, gyro_lpf2_type,
+                gyro_filter_mult,
+                dterm_lpf1_static, dterm_lpf1_dyn_min, dterm_lpf1_dyn_max,
+                dterm_lpf2_static, dterm_lpf2_type, yaw_lpf,
+                dterm_filter_mult,
+                dyn_notch_count, dyn_notch_q, dyn_notch_min, dyn_notch_max,
+                rpm_harmonics, rpm_min_hz
             ))
         } else {
             None
@@ -1796,8 +1929,8 @@ impl SuggestionsTab {
     fn build_flight_metrics(&self) -> FlightMetrics {
         let headers = &self.fd.unknown_headers;
         
-        // Parse PIDs from headers
-        let parse_pid = |key: &str| -> [f32; 4] {
+        // Parse PIDs from headers (format: "P,I,D")
+        let parse_pid_3 = |key: &str| -> [f32; 3] {
             headers.get(key)
                 .map(|s| {
                     let parts: Vec<f32> = s.split(',')
@@ -1807,30 +1940,77 @@ impl SuggestionsTab {
                         parts.first().copied().unwrap_or(0.0),
                         parts.get(1).copied().unwrap_or(0.0),
                         parts.get(2).copied().unwrap_or(0.0),
-                        parts.get(3).copied().unwrap_or(0.0),
                     ]
                 })
-                .unwrap_or([0.0; 4])
+                .unwrap_or([0.0; 3])
         };
         
-        // Parse D-min values
-        let get_dmin = |axis: &str| -> f32 {
-            headers.get(&format!("d_min_{}", axis))
-                .or_else(|| headers.get(&format!("dmin_{}", axis)))
-                .and_then(|s| s.parse().ok())
-                .unwrap_or(0.0)
-        };
+        // Parse ff_weight (format: "roll,pitch,yaw" e.g., "100,105,80")
+        let ff_weights: Vec<f32> = headers.get("ff_weight")
+            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+            .unwrap_or_default();
+        
+        // Combine PID + FF for the 4-element array expected by FlightMetrics
+        let roll_pid_3 = parse_pid_3("rollPID");
+        let pitch_pid_3 = parse_pid_3("pitchPID");
+        let yaw_pid_3 = parse_pid_3("yawPID");
+        
+        let roll_pid = [roll_pid_3[0], roll_pid_3[1], roll_pid_3[2], ff_weights.first().copied().unwrap_or(0.0)];
+        let pitch_pid = [pitch_pid_3[0], pitch_pid_3[1], pitch_pid_3[2], ff_weights.get(1).copied().unwrap_or(0.0)];
+        let yaw_pid = [yaw_pid_3[0], yaw_pid_3[1], yaw_pid_3[2], ff_weights.get(2).copied().unwrap_or(0.0)];
+        
+        // Parse D-min values from d_min header (format: "50,65,0" for roll,pitch,yaw)
+        let d_min_values: Vec<f32> = headers.get("d_min")
+            .map(|s| s.split(',').filter_map(|v| v.trim().parse().ok()).collect())
+            .unwrap_or_default();
         
         let duration = self.fd.times.last().copied().unwrap_or(0.0);
+        
+        // Helper to parse u32 from header
+        let parse_u32 = |key: &str| -> Option<u32> {
+            headers.get(key).and_then(|s| s.parse().ok())
+        };
+        
+        // Helper to parse string enums
+        let parse_iterm_relax_type = |val: &str| -> String {
+            match val {
+                "0" => "Gyro".to_string(),
+                "1" => "Setpoint".to_string(),
+                _ => val.to_string()
+            }
+        };
+        
+        let parse_ff_averaging = |val: &str| -> String {
+            match val {
+                "0" => "OFF".to_string(),
+                "1" => "2 Point".to_string(),
+                "2" => "3 Point".to_string(),
+                "3" => "4 Point".to_string(),
+                _ => val.to_string()
+            }
+        };
+        
+        let parse_tpa_mode = |val: &str| -> String {
+            match val {
+                "0" => "OFF".to_string(),
+                "1" => "D".to_string(),
+                "2" => "PD".to_string(),
+                _ => val.to_string()
+            }
+        };
         
         FlightMetrics {
             firmware: headers.get("Firmware revision").cloned().unwrap_or_else(|| "Unknown".to_string()),
             craft_name: headers.get("Craft name").cloned().unwrap_or_else(|| "Unknown".to_string()),
             duration_sec: duration,
-            roll_pid: parse_pid("rollPID"),
-            pitch_pid: parse_pid("pitchPID"),
-            yaw_pid: parse_pid("yawPID"),
-            d_min: [get_dmin("roll"), get_dmin("pitch"), get_dmin("yaw")],
+            roll_pid,
+            pitch_pid,
+            yaw_pid,
+            d_min: [
+                d_min_values.first().copied().unwrap_or(0.0),
+                d_min_values.get(1).copied().unwrap_or(0.0),
+                d_min_values.get(2).copied().unwrap_or(0.0),
+            ],
             step_overshoot: [
                 self.analysis.step_overshoot[0] as f32,
                 self.analysis.step_overshoot[1] as f32,
@@ -1867,34 +2047,36 @@ impl SuggestionsTab {
             rpm_filter_harmonics: headers.get("rpm_filter_harmonics")
                 .and_then(|s| s.parse().ok()),
             
-            // ===== Enhanced metrics =====
-            // Rate settings
+            // Rate settings (parse from comma-separated values like rc_rates:3,3,1)
             rc_rate: {
-                let roll = headers.get("roll_rc_rate").or_else(|| headers.get("rc_rate")).and_then(|s| s.parse().ok());
-                let pitch = headers.get("pitch_rc_rate").or_else(|| headers.get("rc_rate")).and_then(|s| s.parse().ok());
-                let yaw = headers.get("yaw_rc_rate").and_then(|s| s.parse().ok());
-                match (roll, pitch, yaw) {
-                    (Some(r), Some(p), Some(y)) => Some([r, p, y]),
-                    _ => None,
-                }
+                headers.get("rc_rates").map(|s| {
+                    let parts: Vec<f32> = s.split(',').filter_map(|v| v.parse().ok()).collect();
+                    [
+                        parts.first().copied().unwrap_or(1.0),
+                        parts.get(1).copied().unwrap_or(1.0),
+                        parts.get(2).copied().unwrap_or(1.0),
+                    ]
+                })
             },
             rc_expo: {
-                let roll = headers.get("roll_expo").or_else(|| headers.get("rc_expo")).and_then(|s| s.parse().ok());
-                let pitch = headers.get("pitch_expo").or_else(|| headers.get("rc_expo")).and_then(|s| s.parse().ok());
-                let yaw = headers.get("yaw_expo").and_then(|s| s.parse().ok());
-                match (roll, pitch, yaw) {
-                    (Some(r), Some(p), Some(y)) => Some([r, p, y]),
-                    _ => None,
-                }
+                headers.get("rc_expo").map(|s| {
+                    let parts: Vec<f32> = s.split(',').filter_map(|v| v.parse().ok()).collect();
+                    [
+                        parts.first().copied().unwrap_or(0.0),
+                        parts.get(1).copied().unwrap_or(0.0),
+                        parts.get(2).copied().unwrap_or(0.0),
+                    ]
+                })
             },
             super_rate: {
-                let roll = headers.get("roll_srate").or_else(|| headers.get("rc_super_rate")).and_then(|s| s.parse().ok());
-                let pitch = headers.get("pitch_srate").or_else(|| headers.get("rc_super_rate")).and_then(|s| s.parse().ok());
-                let yaw = headers.get("yaw_srate").and_then(|s| s.parse().ok());
-                match (roll, pitch, yaw) {
-                    (Some(r), Some(p), Some(y)) => Some([r, p, y]),
-                    _ => None,
-                }
+                headers.get("rates").map(|s| {
+                    let parts: Vec<f32> = s.split(',').filter_map(|v| v.parse().ok()).collect();
+                    [
+                        parts.first().copied().unwrap_or(0.0),
+                        parts.get(1).copied().unwrap_or(0.0),
+                        parts.get(2).copied().unwrap_or(0.0),
+                    ]
+                })
             },
             
             // Motor statistics - use defaults (can be enhanced later)
@@ -1911,6 +2093,45 @@ impl SuggestionsTab {
             // Step response timing (not computed yet - future enhancement)
             step_rise_time_ms: None,
             step_settling_time_ms: None,
+            
+            // ===== PID Controller Settings =====
+            
+            // Feedforward settings
+            feedforward_jitter_reduction: parse_u32("feedforward_jitter_factor"),
+            feedforward_smoothness: parse_u32("feedforward_smooth_factor"),
+            feedforward_averaging: headers.get("feedforward_averaging").map(|s| parse_ff_averaging(s)),
+            feedforward_boost: parse_u32("feedforward_boost"),
+            feedforward_max_rate_limit: parse_u32("feedforward_max_rate_limit"),
+            feedforward_transition: parse_u32("feedforward_transition"),
+            
+            // I-Term settings
+            iterm_relax_enabled: headers.get("iterm_relax").map(|s| s != "0").unwrap_or(true),
+            iterm_relax_type: headers.get("iterm_relax_type").map(|s| parse_iterm_relax_type(s)),
+            iterm_relax_cutoff: parse_u32("iterm_relax_cutoff"),
+            iterm_rotation: headers.get("iterm_rotation").map(|s| s != "0").unwrap_or(false),
+            
+            // Anti-Gravity
+            anti_gravity_gain: parse_u32("anti_gravity_gain"),
+            
+            // Dynamic Damping (D-Max)
+            d_max_gain: parse_u32("d_max_gain"),
+            d_max_advance: parse_u32("d_max_advance"),
+            
+            // Throttle and Motor Settings
+            throttle_boost: parse_u32("throttle_boost"),
+            motor_output_limit: parse_u32("motor_output_limit"),
+            dyn_idle_min_rpm: parse_u32("dyn_idle_min_rpm"),
+            vbat_sag_compensation: parse_u32("vbat_sag_compensation"),
+            thrust_linear: parse_u32("thrust_linear"),
+            
+            // TPA
+            tpa_mode: headers.get("tpa_mode").map(|s| parse_tpa_mode(s)),
+            tpa_rate: parse_u32("tpa_rate"),
+            tpa_breakpoint: parse_u32("tpa_breakpoint"),
+            
+            // Misc
+            integrated_yaw: headers.get("use_integrated_yaw").map(|s| s != "0").unwrap_or(false),
+            abs_control_gain: parse_u32("abs_control_gain"),
         }
     }
     

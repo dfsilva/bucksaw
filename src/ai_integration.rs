@@ -215,27 +215,64 @@ pub struct FlightMetrics {
     pub dyn_notch_max: Option<f32>,
     pub rpm_filter_harmonics: Option<f32>,
 
-    // ===== NEW: Enhanced metrics for AI context =====
-
     // Rate settings (roll, pitch, yaw)
     pub rc_rate: Option<[f32; 3]>,
     pub rc_expo: Option<[f32; 3]>,
     pub super_rate: Option<[f32; 3]>,
 
     // Motor statistics
-    pub motor_min_pct: f32, // Minimum motor output (average of all motors)
-    pub motor_max_pct: f32, // Maximum motor output
-    pub motor_avg_pct: f32, // Average motor output
-    pub motor_differential: f32, // Max difference between motors (imbalance indicator)
+    pub motor_min_pct: f32,
+    pub motor_max_pct: f32,
+    pub motor_avg_pct: f32,
+    pub motor_differential: f32,
 
     // Anomaly summary
-    pub anomaly_count: usize,           // Total detected anomalies
-    pub motor_saturation_events: usize, // Count of saturation events
-    pub high_vibration_events: usize,   // Count of high vibe events
+    pub anomaly_count: usize,
+    pub motor_saturation_events: usize,
+    pub high_vibration_events: usize,
 
-    // Step response timing (estimated, in ms)
-    pub step_rise_time_ms: Option<[f32; 3]>, // Time to reach 90% of setpoint
-    pub step_settling_time_ms: Option<[f32; 3]>, // Time to settle within 5%
+    // Step response timing
+    pub step_rise_time_ms: Option<[f32; 3]>,
+    pub step_settling_time_ms: Option<[f32; 3]>,
+
+    // ===== PID Controller Settings =====
+
+    // Feedforward settings
+    pub feedforward_jitter_reduction: Option<u32>,
+    pub feedforward_smoothness: Option<u32>,
+    pub feedforward_averaging: Option<String>, // "OFF", "2 Point", etc.
+    pub feedforward_boost: Option<u32>,
+    pub feedforward_max_rate_limit: Option<u32>,
+    pub feedforward_transition: Option<u32>,
+
+    // I-Term settings
+    pub iterm_relax_enabled: bool,
+    pub iterm_relax_type: Option<String>, // "Setpoint", "Gyro"
+    pub iterm_relax_cutoff: Option<u32>,
+    pub iterm_rotation: bool,
+
+    // Anti-Gravity
+    pub anti_gravity_gain: Option<u32>,
+
+    // Dynamic Damping (D-Max)
+    pub d_max_gain: Option<u32>,
+    pub d_max_advance: Option<u32>,
+
+    // Throttle and Motor Settings
+    pub throttle_boost: Option<u32>,
+    pub motor_output_limit: Option<u32>,
+    pub dyn_idle_min_rpm: Option<u32>,
+    pub vbat_sag_compensation: Option<u32>,
+    pub thrust_linear: Option<u32>,
+
+    // TPA
+    pub tpa_mode: Option<String>, // "OFF", "D", "PD"
+    pub tpa_rate: Option<u32>,
+    pub tpa_breakpoint: Option<u32>,
+
+    // Misc
+    pub integrated_yaw: bool,
+    pub abs_control_gain: Option<u32>,
 }
 
 impl FlightMetrics {
@@ -305,13 +342,142 @@ impl FlightMetrics {
             }
         };
 
+        // Build PID Controller Settings section
+        let pid_controller_section = {
+            let mut info = String::new();
+
+            // Feedforward
+            info.push_str("### Feedforward\n");
+            if let Some(v) = self.feedforward_jitter_reduction {
+                info.push_str(&format!("- Jitter Reduction: {}\n", v));
+            }
+            if let Some(v) = self.feedforward_smoothness {
+                info.push_str(&format!("- Smoothness: {}\n", v));
+            }
+            if let Some(ref v) = self.feedforward_averaging {
+                info.push_str(&format!("- Averaging: {}\n", v));
+            }
+            if let Some(v) = self.feedforward_boost {
+                info.push_str(&format!("- Boost: {}\n", v));
+            }
+            if let Some(v) = self.feedforward_max_rate_limit {
+                info.push_str(&format!("- Max Rate Limit: {}\n", v));
+            }
+            if let Some(v) = self.feedforward_transition {
+                info.push_str(&format!("- Transition: {}\n", v));
+            }
+
+            // I-Term settings
+            info.push_str("\n### I-Term Settings\n");
+            info.push_str(&format!(
+                "- I-Term Relax: {}\n",
+                if self.iterm_relax_enabled {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            ));
+            if let Some(ref v) = self.iterm_relax_type {
+                info.push_str(&format!("- Relax Type: {}\n", v));
+            }
+            if let Some(v) = self.iterm_relax_cutoff {
+                info.push_str(&format!("- Relax Cutoff: {}\n", v));
+            }
+            info.push_str(&format!(
+                "- I-Term Rotation: {}\n",
+                if self.iterm_rotation {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            ));
+
+            // Anti-Gravity
+            info.push_str("\n### Anti-Gravity\n");
+            if let Some(v) = self.anti_gravity_gain {
+                info.push_str(&format!(
+                    "- Gain: {} ({})\n",
+                    v,
+                    if v > 0 { "Enabled" } else { "Disabled" }
+                ));
+            }
+
+            // Dynamic Damping (D-Max)
+            info.push_str("\n### Dynamic Damping (D-Max)\n");
+            if let Some(v) = self.d_max_gain {
+                info.push_str(&format!("- Gain: {}\n", v));
+            }
+            if let Some(v) = self.d_max_advance {
+                info.push_str(&format!("- Advance: {}\n", v));
+            }
+
+            // Throttle & Motor
+            info.push_str("\n### Throttle & Motor Settings\n");
+            if let Some(v) = self.throttle_boost {
+                info.push_str(&format!("- Throttle Boost: {}\n", v));
+            }
+            if let Some(v) = self.motor_output_limit {
+                info.push_str(&format!("- Motor Output Limit: {}%\n", v));
+            }
+            if let Some(v) = self.dyn_idle_min_rpm {
+                info.push_str(&format!("- Dynamic Idle: {} (x100 RPM)\n", v));
+            }
+            if let Some(v) = self.vbat_sag_compensation {
+                info.push_str(&format!("- Vbat Sag Compensation: {}%\n", v));
+            }
+            if let Some(v) = self.thrust_linear {
+                info.push_str(&format!("- Thrust Linearization: {}%\n", v));
+            }
+
+            // TPA
+            info.push_str("\n### TPA (Throttle PID Attenuation)\n");
+            if let Some(ref v) = self.tpa_mode {
+                info.push_str(&format!("- Mode: {}\n", v));
+            }
+            if let Some(v) = self.tpa_rate {
+                info.push_str(&format!("- Rate: {}%\n", v));
+            }
+            if let Some(v) = self.tpa_breakpoint {
+                info.push_str(&format!("- Breakpoint: {}µs\n", v));
+            }
+
+            // Misc
+            info.push_str("\n### Miscellaneous\n");
+            info.push_str(&format!(
+                "- Integrated Yaw: {}\n",
+                if self.integrated_yaw {
+                    "Enabled"
+                } else {
+                    "Disabled"
+                }
+            ));
+            if let Some(v) = self.abs_control_gain {
+                info.push_str(&format!(
+                    "- Absolute Control: {} ({})\n",
+                    v,
+                    if v > 0 { "Enabled" } else { "Disabled" }
+                ));
+            }
+
+            format!("## PID Controller Settings\n{}", info)
+        };
+
         format!(
             r#"Analyze this FPV drone flight log and provide specific tuning recommendations.
 
+IMPORTANT: The user is running firmware version "{firmware}". 
+All CLI commands you provide MUST be compatible with this exact firmware version.
+Do NOT suggest commands or parameters that don't exist in this version.
+
 ## Craft Info
-- Firmware: {}
-- Craft: {}
-- Flight Duration: {:.1}s
+- Firmware Version: {firmware}
+- Craft Name: {craft}
+- Flight Duration: {duration:.1}s"#,
+            firmware = self.firmware,
+            craft = self.craft_name,
+            duration = self.duration_sec,
+        ) + &format!(
+            r#"
 
 ## Current PID Settings
 | Axis | P | I | D-Max | D-Min | FF |
@@ -322,6 +488,8 @@ impl FlightMetrics {
 
 Note: D-Max is the max D gain at high stick movement. D-Min is D at low stick input.
 Feedforward (FF) provides instantaneous stick response.
+
+{}
 
 ## Step Response Analysis (from gyro data)
 - Roll Overshoot: {:.1}% | Undershoot: {:.1}%
@@ -343,13 +511,13 @@ Feedforward (FF) provides instantaneous stick response.
 
 Please provide:
 1. Overall assessment (is the tune good, needs work, or problematic?)
-2. Specific PID adjustments with Betaflight CLI commands (use set command format)
-3. D-gain and Feedforward recommendations
+2. Specific PID adjustments with CLI commands compatible with {}
+3. D-gain, D-max, and Feedforward recommendations based on the controller settings
 4. Filter recommendations if noise is high
-5. Any other observations or warnings"#,
-            self.firmware,
-            self.craft_name,
-            self.duration_sec,
+5. TPA and Anti-Gravity recommendations based on current settings
+6. Any other observations or warnings about the current tune
+
+REMINDER: Only use CLI commands that exist in {}."#,
             // Roll
             self.roll_pid[0],
             self.roll_pid[1],
@@ -368,6 +536,8 @@ Please provide:
             self.yaw_pid[2],
             self.d_min[2],
             self.yaw_pid[3],
+            // PID Controller Settings
+            pid_controller_section,
             // Step response
             self.step_overshoot[0] * 100.0,
             self.step_undershoot[0] * 100.0,
@@ -389,7 +559,10 @@ Please provide:
             self.motor_saturation_pct,
             // Filters & Rates
             filter_section,
-            rate_section
+            rate_section,
+            // Firmware mentions
+            self.firmware,
+            self.firmware,
         )
     }
 }
