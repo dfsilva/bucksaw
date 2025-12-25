@@ -3,31 +3,35 @@ pub mod colors;
 pub mod flex;
 pub mod flight_view;
 pub mod open_file;
+pub mod opened_file;
 pub mod tabs;
 
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use blackbox_log::headers::ParseError;
 use egui::Layout;
-use egui::Vec2;
 use itertools::Itertools;
 
-use crate::flight_data::FlightData;
 use crate::gui::blackbox_ui_ext::*;
 use crate::gui::colors::Colors;
 use crate::gui::flight_view::*;
 use crate::gui::open_file::*;
+use crate::gui::opened_file::*;
 use crate::gui::tabs::*;
 use crate::log_file::*;
 
-type FlightDataAndView = Vec<(Result<Arc<FlightData>, ParseError>, Option<FlightView>)>;
+/// Selection state tracking both file and flight indices
+#[derive(Default, Clone, Copy, PartialEq)]
+pub struct Selection {
+    pub file_index: usize,
+    pub flight_index: usize,
+}
 
 pub struct App {
     open_file_dialog: Option<OpenFileDialog>,
     flight_view_tab: FlightViewTab,
-    flights_data_views: FlightDataAndView,
-    selected: usize,
+    opened_files: Vec<OpenedFile>,
+    selected: Selection,
     left_panel_open: bool,
 }
 
@@ -39,14 +43,14 @@ impl App {
         Self {
             open_file_dialog,
             flight_view_tab: FlightViewTab::Plot,
-            flights_data_views: Default::default(),
-            selected: Default::default(),
+            opened_files: Vec::new(),
+            selected: Selection::default(),
             left_panel_open: true,
         }
     }
 
     fn open_log(&mut self, ctx: &egui::Context, file_data: LogFile) {
-        self.flights_data_views = file_data
+        let flights: FlightDataAndView = file_data
             .flights
             .into_iter()
             .map(|f| match f {
@@ -57,14 +61,56 @@ impl App {
                 Err(e) => (Err(e), None),
             })
             .collect_vec();
-        self.selected = self.flights_data_views.len() - 1;
 
-        let single_log = self.flights_data_views.len() == 1;
+        let file_name = file_data.file_name;
+        let flight_count = flights.len();
+
+        let opened_file = OpenedFile::new(file_name, flights);
+        self.opened_files.push(opened_file);
+
+        // Select the last flight in the newly opened file
+        self.selected = Selection {
+            file_index: self.opened_files.len() - 1,
+            flight_index: flight_count.saturating_sub(1),
+        };
+
         self.open_file_dialog = None;
 
-        if single_log || ctx.available_rect().width() < 1000.0 {
-            self.left_panel_open = false;
+        // Keep panel open when we have files
+        if !self.opened_files.is_empty() {
+            self.left_panel_open = true;
         }
+    }
+
+    fn close_file(&mut self, file_index: usize) {
+        if file_index < self.opened_files.len() {
+            self.opened_files.remove(file_index);
+
+            // Adjust selection if needed
+            if self.opened_files.is_empty() {
+                self.selected = Selection::default();
+            } else if self.selected.file_index >= self.opened_files.len() {
+                // Select last file's first flight
+                self.selected = Selection {
+                    file_index: self.opened_files.len() - 1,
+                    flight_index: 0,
+                };
+            } else if self.selected.file_index == file_index {
+                // Closed the selected file, select first flight of same index or previous
+                let new_file_index = file_index.min(self.opened_files.len() - 1);
+                self.selected = Selection {
+                    file_index: new_file_index,
+                    flight_index: 0,
+                };
+            }
+        }
+    }
+
+    fn get_selected_view_mut(&mut self) -> Option<&mut FlightView> {
+        self.opened_files
+            .get_mut(self.selected.file_index)
+            .and_then(|file| file.flights.get_mut(self.selected.flight_index))
+            .and_then(|(_, view)| view.as_mut())
     }
 }
 
@@ -145,13 +191,18 @@ impl eframe::App for App {
                     ui.separator();
 
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.hyperlink_to("", env!("CARGO_PKG_REPOSITORY"));
+                        ui.hyperlink_to("", env!("CARGO_PKG_REPOSITORY"));
                         ui.separator();
                         egui::widgets::global_dark_light_mode_switch(ui);
                         ui.separator();
                     });
                 });
             });
+
+        // Track actions to perform after iterating (to avoid borrow issues)
+        let mut file_to_close: Option<usize> = None;
+        let mut new_selection: Option<Selection> = None;
+        let mut toggle_expand: Option<usize> = None;
 
         if self.left_panel_open {
             let panel_draw = |ui: &mut egui::Ui| {
@@ -161,62 +212,102 @@ impl eframe::App for App {
                     ui.set_width(ui.available_width());
 
                     let colors = Colors::get(ui);
-                    let row_colors: Vec<_> = self
-                        .flights_data_views
-                        .iter()
-                        .map(|(result, _)| match result {
-                            Err(_) => Some(colors.error.gamma_multiply(0.3)),
-                            Ok(flight) if self.selected == flight.index => {
-                                Some(ui.visuals().selection.bg_fill.gamma_multiply(0.5))
-                            }
-                            Ok(_) => None,
-                        })
-                        .collect();
-                    egui::Grid::new("flight_list")
-                        .with_row_color(move |i, _style| row_colors.get(i).copied().flatten())
-                        .num_columns(1)
-                        .spacing(Vec2::new(0.0, 10.0))
-                        .show(ui, |ui| {
-                            ui.set_width(ui.available_width());
 
-                            for (i, (parse_result, _)) in self.flights_data_views.iter().enumerate()
-                            {
-                                ui.vertical(|ui| {
-                                    ui.set_width(ui.available_width());
-
-                                    ui.horizontal(|ui| {
-                                        if parse_result.is_ok() {
-                                            ui.label("Flight ");
-                                        } else {
-                                            ui.label("⚠ Flight ");
-                                        }
-                                        ui.monospace(format!("#{}", i + 1));
-
-                                        if parse_result.is_ok() {
-                                            ui.with_layout(
-                                                Layout::right_to_left(egui::Align::Center),
-                                                |ui| {
-                                                    if ui.button("➡").clicked() {
-                                                        self.selected = i;
-                                                    }
-                                                },
-                                            );
-                                        }
-                                    });
-
-                                    match parse_result {
-                                        Ok(flight) => {
-                                            flight.show(ui);
-                                        }
-                                        Err(error) => {
-                                            error.show(ui);
-                                        }
+                    for (file_idx, opened_file) in self.opened_files.iter().enumerate() {
+                        // File header
+                        egui::Frame::none()
+                            .fill(ui.visuals().faint_bg_color)
+                            .rounding(4.0)
+                            .inner_margin(4.0)
+                            .show(ui, |ui| {
+                                ui.horizontal(|ui| {
+                                    // Expand/collapse button
+                                    let expand_icon =
+                                        if opened_file.expanded { "▼" } else { "▶" };
+                                    if ui.small_button(expand_icon).clicked() {
+                                        toggle_expand = Some(file_idx);
                                     }
-                                });
 
-                                ui.end_row();
-                            }
-                        });
+                                    // File icon and name
+                                    ui.label("📁");
+                                    ui.label(&opened_file.file_name);
+
+                                    // Close button on the right
+                                    ui.with_layout(
+                                        Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            if ui.small_button("✕").clicked() {
+                                                file_to_close = Some(file_idx);
+                                            }
+                                        },
+                                    );
+                                });
+                            });
+
+                        // Flight list (if expanded)
+                        if opened_file.expanded {
+                            ui.indent(format!("file_{}_flights", file_idx), |ui| {
+                                for (flight_idx, (parse_result, _)) in
+                                    opened_file.flights.iter().enumerate()
+                                {
+                                    let is_selected = self.selected.file_index == file_idx
+                                        && self.selected.flight_index == flight_idx;
+
+                                    let bg_color = if is_selected {
+                                        Some(ui.visuals().selection.bg_fill.gamma_multiply(0.5))
+                                    } else if parse_result.is_err() {
+                                        Some(colors.error.gamma_multiply(0.3))
+                                    } else {
+                                        None
+                                    };
+
+                                    egui::Frame::none()
+                                        .fill(bg_color.unwrap_or(egui::Color32::TRANSPARENT))
+                                        .rounding(2.0)
+                                        .inner_margin(2.0)
+                                        .show(ui, |ui| {
+                                            ui.horizontal(|ui| {
+                                                // Flight indicator
+                                                if parse_result.is_ok() {
+                                                    ui.label("  ");
+                                                } else {
+                                                    ui.label("⚠ ");
+                                                }
+
+                                                ui.label("Flight ");
+                                                ui.monospace(format!("#{}", flight_idx + 1));
+
+                                                if parse_result.is_ok() {
+                                                    ui.with_layout(
+                                                        Layout::right_to_left(egui::Align::Center),
+                                                        |ui| {
+                                                            if ui.small_button("➡").clicked() {
+                                                                new_selection = Some(Selection {
+                                                                    file_index: file_idx,
+                                                                    flight_index: flight_idx,
+                                                                });
+                                                            }
+                                                        },
+                                                    );
+                                                }
+                                            });
+
+                                            // Show flight metadata
+                                            match parse_result {
+                                                Ok(flight) => {
+                                                    flight.show(ui);
+                                                }
+                                                Err(error) => {
+                                                    error.show(ui);
+                                                }
+                                            }
+                                        });
+                                }
+                            });
+                        }
+
+                        ui.add_space(8.0);
+                    }
                 });
             };
             if narrow {
@@ -225,20 +316,35 @@ impl eframe::App for App {
                 egui::SidePanel::left("browserpanel")
                     .resizable(true)
                     .min_width(100.0)
-                    .max_width(300.0)
+                    .max_width(400.0)
                     .show(ctx, panel_draw);
             }
         }
 
+        // Apply deferred actions
+        if let Some(file_idx) = file_to_close {
+            self.close_file(file_idx);
+        }
+        if let Some(selection) = new_selection {
+            self.selected = selection;
+        }
+        if let Some(file_idx) = toggle_expand {
+            if let Some(file) = self.opened_files.get_mut(file_idx) {
+                file.expanded = !file.expanded;
+            }
+        }
+
         if !(self.left_panel_open && narrow) {
+            // Track navigation action to handle after the borrow ends
+            let mut nav_result: Option<NavigationAction> = None;
+            let current_tab = self.flight_view_tab;
+
             egui::CentralPanel::default().show(ctx, |ui| {
                 ui.set_enabled(enabled);
 
-                if let Some((_, Some(view))) = self.flights_data_views.get_mut(self.selected) {
+                if let Some(view) = self.get_selected_view_mut() {
                     // Check for navigation actions (e.g., from Anomalies tab "Jump" buttons)
-                    if let Some(nav_action) = view.show(ui, self.flight_view_tab) {
-                        // Switch to Plot tab to show the anomaly
-                        self.flight_view_tab = FlightViewTab::Plot;
+                    if let Some(nav_action) = view.show(ui, current_tab) {
                         // Set the time range to focus on the anomaly
                         view.set_time_range(
                             nav_action.target_time_start,
@@ -249,9 +355,15 @@ impl eframe::App for App {
                             nav_action.target_time_start,
                             nav_action.target_time_end
                         );
+                        nav_result = Some(nav_action);
                     }
                 }
             });
+
+            // Handle navigation after the borrow ends
+            if nav_result.is_some() {
+                self.flight_view_tab = FlightViewTab::Plot;
+            }
         }
     }
 }

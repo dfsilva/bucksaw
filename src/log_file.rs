@@ -6,6 +6,7 @@ use crate::flight_data::FlightData;
 
 #[derive(Clone)]
 pub struct LogFile {
+    pub file_name: String,
     pub flights: Vec<Result<FlightData, ParseError>>,
 }
 
@@ -46,6 +47,6 @@ impl LogFile {
             async_std::task::sleep(std::time::Duration::from_secs_f32(0.00001)).await;
         }
 
-        Self { flights }
+        Self { file_name, flights }
     }
 }
