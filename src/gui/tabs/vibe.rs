@@ -10,7 +10,7 @@ use crate::gui::flex::*;
 use crate::iter::IterExt;
 use crate::utils::execute_in_background;
 
-use super::{MIN_WIDE_WIDTH, PLOT_HEIGHT};
+use super::PLOT_HEIGHT;
 
 const COLORGRAD_LOOKUP_SIZE: usize = 128;
 const TIME_DOMAIN_TEX_WIDTH: usize = 1024;
@@ -27,16 +27,17 @@ enum VibeDomain {
 enum Colorscheme {
     Turbo,
     Viridis,
-    #[default]
     Inferno,
     Magma,
     Plasma,
     Cividis,
     Spectral,
+    #[default]
+    Hot,
 }
 
 impl Colorscheme {
-    const ALL: [Colorscheme; 7] = [
+    const ALL: [Colorscheme; 8] = [
         Colorscheme::Turbo,
         Colorscheme::Viridis,
         Colorscheme::Inferno,
@@ -44,6 +45,7 @@ impl Colorscheme {
         Colorscheme::Plasma,
         Colorscheme::Cividis,
         Colorscheme::Spectral,
+        Colorscheme::Hot,
     ];
 }
 
@@ -57,6 +59,18 @@ impl From<Colorscheme> for colorgrad::Gradient {
             Colorscheme::Plasma => colorgrad::plasma(),
             Colorscheme::Cividis => colorgrad::cividis(),
             Colorscheme::Spectral => colorgrad::spectral(),
+            Colorscheme::Hot => colorgrad::CustomGradient::new()
+                .colors(&[
+                    colorgrad::Color::from_rgba8(0, 0, 0, 255),
+                    colorgrad::Color::from_rgba8(128, 0, 0, 255), // Dark red
+                    colorgrad::Color::from_rgba8(255, 0, 0, 255),
+                    colorgrad::Color::from_rgba8(255, 165, 0, 255), // Orange
+                    colorgrad::Color::from_rgba8(255, 255, 0, 255),
+                    colorgrad::Color::from_rgba8(255, 255, 255, 255),
+                ])
+                .domain(&[0.0, 0.2, 0.4, 0.6, 0.8, 1.0])
+                .build()
+                .unwrap(),
         }
     }
 }
@@ -282,10 +296,21 @@ impl FftAxis {
         let mut image =
             egui::ColorImage::new([data.len(), data[0].fft.len()], Color32::TRANSPARENT);
 
+        // Use logarithmic scaling (dB) like PIDToolbox for better visual contrast
+        // Convert to dB scale: 20 * log10(val / ref)
+        // We normalize to 0-1 range for colormap
+        let log_max = (max + 1e-10).log10();
+        let log_min = -3.0; // Approximately -60 dB floor
+        let log_range = log_max - log_min;
+
         for x in 0..data.len() {
             for y in 0..data[x].fft.len() {
                 let val = data[x].fft[y];
-                image[(x, y)] = fft_settings.color_at(f32::max(0.0, val) / max);
+                // Apply log scaling with floor
+                let log_val = (val.max(1e-10)).log10();
+                // Normalize to 0-1 range
+                let normalized = ((log_val - log_min) / log_range).clamp(0.0, 1.0);
+                image[(x, y)] = fft_settings.color_at(normalized);
             }
         }
 
@@ -523,7 +548,7 @@ impl FftAxis {
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
             .set_margin_fraction(egui::Vec2::new(0.0, 0.0))
-            .show_grid(false)
+            .show_grid(true)
             .allow_drag([true, false])
             .allow_zoom([true, false])
             .allow_scroll(false)
@@ -532,7 +557,7 @@ impl FftAxis {
             .link_axis("time_vibes", true, true)
             .link_cursor("global_timeseries", true, false)
             .y_axis_position(egui_plot::HPlacement::Right)
-            .y_axis_width(3)
+            .y_axis_width(2)
             .y_axis_formatter(move |gm, _, _| format!("{:.0}Hz", gm.value * max_freq))
             .label_formatter(move |_name, val| format!("{:.0}Hz\n{:.3}s", val.y * max_freq, val.x))
             .height(height)
@@ -561,7 +586,7 @@ impl FftAxis {
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
             .set_margin_fraction(egui::Vec2::new(0.0, 0.0))
-            .show_grid(false)
+            .show_grid(true)
             .allow_drag([true, false])
             .allow_zoom([true, false])
             .allow_scroll(false)
@@ -571,7 +596,7 @@ impl FftAxis {
             .link_cursor("throttle_vibes", true, true)
             .x_axis_formatter(move |gm, _, _| format!("{:.0}%", gm.value * 100.0))
             .y_axis_position(egui_plot::HPlacement::Right)
-            .y_axis_width(3)
+            .y_axis_width(2)
             .y_axis_formatter(move |gm, _, _| format!("{:.0}Hz", gm.value * max_freq))
             .label_formatter(move |_, val| {
                 format!("{:.0}Hz\n{:.0}%", val.y * max_freq, val.x * 100.0)
@@ -701,6 +726,7 @@ pub struct VibeTab {
 
     gyro_raw_ffts: FftVectorSeries,
     gyro_filtered_ffts: FftVectorSeries,
+    dterm_raw_ffts: FftVectorSeries, // [NEW] Added D-Term Raw series
     dterm_filtered_ffts: FftVectorSeries,
     setpoint_ffts: FftVectorSeries,
     pid_error_ffts: FftVectorSeries,
@@ -718,6 +744,7 @@ pub struct VibeTab {
 // Static storage for computed data (needed for FFT callbacks)
 static PID_ERROR_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
 static PID_SUM_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
+static D_TERM_CALC_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
 
 impl VibeTab {
     pub fn new(ctx: &egui::Context, fd: Arc<FlightData>) -> Self {
@@ -763,6 +790,31 @@ impl VibeTab {
                     .try_into()
                     .unwrap()
             });
+        // D-term pre-filter: try direct data first, then use calculated from gyro derivative
+        let d_raw_direct = fd.d_unfiltered();
+        let has_direct_d_raw = d_raw_direct.iter().any(|opt| opt.is_some());
+
+        if !has_direct_d_raw {
+            // Calculate D-term pre-filter from gyro derivative and cache it
+            if let Some(calculated) = fd.d_unfiltered_calculated() {
+                let _ = D_TERM_CALC_CACHE.set(calculated);
+            }
+        }
+
+        let dterm_raw_ffts =
+            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
+                // First try direct data
+                let direct = fd.d_unfiltered();
+                if direct.iter().any(|opt| opt.is_some()) {
+                    return direct;
+                }
+                // Fall back to calculated cache
+                match D_TERM_CALC_CACHE.get() {
+                    Some(data) => [Some(&data[0]), Some(&data[1]), Some(&data[2])],
+                    None => [None, None, None],
+                }
+            });
+
         let dterm_filtered_ffts =
             FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
                 fd.d()
@@ -804,7 +856,7 @@ impl VibeTab {
                 .map(|v| !v[0].is_empty())
                 .unwrap_or(false),
             gyro_filtered_enabled: true,
-            dterm_raw_enabled: false, // TODO
+            dterm_raw_enabled: has_direct_d_raw || D_TERM_CALC_CACHE.get().is_some(),
             dterm_filtered_enabled: true,
             setpoint_enabled: false,
             pid_error_enabled: false,
@@ -840,6 +892,7 @@ impl VibeTab {
 
             gyro_raw_ffts,
             gyro_filtered_ffts,
+            dterm_raw_ffts,
             dterm_filtered_ffts,
             setpoint_ffts,
             pid_error_ffts,
@@ -856,6 +909,8 @@ impl VibeTab {
         self.gyro_raw_ffts
             .set_fft_settings(self.fft_settings.clone());
         self.gyro_filtered_ffts
+            .set_fft_settings(self.fft_settings.clone());
+        self.dterm_raw_ffts
             .set_fft_settings(self.fft_settings.clone());
         self.dterm_filtered_ffts
             .set_fft_settings(self.fft_settings.clone());
@@ -1040,38 +1095,51 @@ impl VibeTab {
             usize::MAX // No columns enabled
         };
 
-        FlexColumns::new(MIN_WIDE_WIDTH)
-            .column_enabled(self.gyro_raw_enabled, |ui| {
-                ui.heading("Gyro (raw)");
-                self.gyro_raw_ffts.show(ui, self.domain, first_enabled == 0)
-            })
-            .column_enabled(self.gyro_filtered_enabled, |ui| {
-                ui.heading("Gyro (filtered)");
-                self.gyro_filtered_ffts
-                    .show(ui, self.domain, first_enabled == 1)
-            })
-            .column_enabled(self.dterm_raw_enabled, |ui| {
-                ui.heading("D Term (raw)")
-                //self.dterm_raw_ffts.show(ui, self.domain, first_enabled == 2)
-            })
-            .column_enabled(self.dterm_filtered_enabled, |ui| {
-                ui.heading("D Term (filtered)");
-                self.dterm_filtered_ffts
-                    .show(ui, self.domain, first_enabled == 3)
-            })
-            .column_enabled(self.setpoint_enabled, |ui| {
-                ui.heading("Setpoint");
-                self.setpoint_ffts.show(ui, self.domain, first_enabled == 4)
-            })
-            .column_enabled(self.pid_error_enabled, |ui| {
-                ui.heading("PID Error");
-                self.pid_error_ffts
-                    .show(ui, self.domain, first_enabled == 5)
-            })
-            .column_enabled(self.pid_sum_enabled, |ui| {
-                ui.heading("PID Sum");
-                self.pid_sum_ffts.show(ui, self.domain, first_enabled == 6)
-            })
-            .show(ui);
+        // Display 4 columns with equal widths like PIDToolbox
+        let enabled_columns: Vec<(bool, &str, &mut FftVectorSeries, usize)> = vec![
+            (
+                self.gyro_raw_enabled,
+                "Gyro (raw)",
+                &mut self.gyro_raw_ffts,
+                0,
+            ),
+            (
+                self.gyro_filtered_enabled,
+                "Gyro (filtered)",
+                &mut self.gyro_filtered_ffts,
+                1,
+            ),
+            (
+                self.dterm_raw_enabled,
+                "D Term (raw)",
+                &mut self.dterm_raw_ffts,
+                2,
+            ),
+            (
+                self.dterm_filtered_enabled,
+                "D Term (filtered)",
+                &mut self.dterm_filtered_ffts,
+                3,
+            ),
+        ];
+
+        let active_columns: Vec<_> = enabled_columns
+            .into_iter()
+            .filter(|(enabled, _, _, _)| *enabled)
+            .collect();
+
+        if active_columns.is_empty() {
+            return;
+        }
+
+        let num_cols = active_columns.len();
+        let domain = self.domain;
+
+        ui.columns(num_cols, |columns| {
+            for (i, (_, title, fft_series, _)) in active_columns.into_iter().enumerate() {
+                columns[i].heading(title);
+                fft_series.show(&mut columns[i], domain, i == 0);
+            }
+        });
     }
 }

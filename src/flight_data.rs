@@ -196,17 +196,64 @@ impl FlightData {
     }
 
     /// Get pre-filtered (raw) D-term if available
+    /// This checks for dedicated fields first, then falls back to:
+    /// 1. Debug channels when debug_mode is D_LPF
+    /// 2. Calculating derivative of filtered gyro (which approximates D-term pre-filter)
     pub fn d_unfiltered(&self) -> [Option<&Vec<f32>>; 3] {
-        (0..3)
+        // First try dedicated fields (newer firmware)
+        let from_dedicated: [Option<&Vec<f32>>; 3] = (0..3)
             .map(|i| {
-                // Try different field names used by different firmware versions
                 self.main_values
                     .get(&format!("axisDRaw[{}]", i))
                     .or_else(|| self.main_values.get(&format!("axisD_UnFilt[{}]", i)))
             })
             .collect::<Vec<_>>()
             .try_into()
-            .unwrap()
+            .unwrap();
+
+        // If any axis has dedicated data, use that
+        if from_dedicated.iter().any(|opt| opt.is_some()) {
+            return from_dedicated;
+        }
+
+        // Fall back to debug channels for D_LPF debug mode (mode 6)
+        match self.debug_mode {
+            DebugMode::DLpf => {
+                [
+                    self.main_values.get("debug[0]"), // Roll pre-filter
+                    self.main_values.get("debug[2]"), // Pitch pre-filter
+                    self.main_values.get("debug[4]"), // Yaw pre-filter (if available)
+                ]
+            }
+            _ => [None, None, None],
+        }
+    }
+
+    /// Calculate D-term pre-filter from filtered gyro derivative
+    /// This approximates what PIDToolbox shows as "Dterm prefilt"
+    pub fn d_unfiltered_calculated(&self) -> Option<[Vec<f32>; 3]> {
+        let gyro = self.gyro_filtered()?;
+        let sample_rate = self.sample_rate() as f32;
+        let dt = 1.0 / sample_rate;
+
+        Some([
+            Self::calculate_derivative(gyro[0], dt),
+            Self::calculate_derivative(gyro[1], dt),
+            Self::calculate_derivative(gyro[2], dt),
+        ])
+    }
+
+    /// Calculate the derivative of a signal (approximating D-term before filtering)
+    fn calculate_derivative(data: &[f32], dt: f32) -> Vec<f32> {
+        if data.len() < 2 {
+            return vec![];
+        }
+        let mut result = Vec::with_capacity(data.len());
+        result.push(0.0); // First sample has no derivative
+        for i in 1..data.len() {
+            result.push((data[i] - data[i - 1]) / dt);
+        }
+        result
     }
 
     /// Get debug channel data (up to 8 channels depending on debug mode)
