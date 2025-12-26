@@ -1532,6 +1532,541 @@ impl SuggestionsTab {
             });
         }
 
+        // === SIMPLIFIED TUNING DETECTION ===
+        let using_simplified = headers
+            .get("simplified_pids_mode")
+            .map(|v| v != "0" && v.to_lowercase() != "off")
+            .unwrap_or(false);
+
+        if using_simplified {
+            suggestions.push(TuningSuggestion {
+                category: "Simplified Tuning".to_string(),
+                title: "Simplified PID Tuning Active".to_string(),
+                description: "You're using Betaflight's simplified tuning sliders. Individual PID CLI commands may override them.".to_string(),
+                recommendation: "Consider using Master Multiplier slider instead of individual PID adjustments. After CLI changes, run 'simplified_tuning apply' to recalculate.".to_string(),
+                cli_command: None,
+                severity: Severity::Info,
+            });
+        }
+
+        // === DYNAMIC NOTCH ANALYSIS ===
+        let dyn_notch_count = get_val(&["dyn_notch_count"]).unwrap_or(3.0) as i32;
+        let dyn_notch_q = get_val(&["dyn_notch_q"]).unwrap_or(300.0);
+        let dyn_notch_min = get_val(&["dyn_notch_min_hz"]).unwrap_or(100.0);
+        let dyn_notch_max = get_val(&["dyn_notch_max_hz"]).unwrap_or(600.0);
+
+        // Check if dyn notch count is too low for noisy quad
+        if dyn_notch_count < 3 && analysis.gyro_noise_mid_throttle > 8.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Dynamic Notch".to_string(),
+                title: "Dynamic notch count may be too low".to_string(),
+                description: format!(
+                    "dyn_notch_count = {}. With noise level {:.1}, multiple motor peaks may not be filtered.",
+                    dyn_notch_count, analysis.gyro_noise_mid_throttle
+                ),
+                recommendation: "Increase dynamic notch count for better peak tracking.".to_string(),
+                cli_command: Some("set dyn_notch_count = 3".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // Check dyn notch Q (lower Q = wider notch = more latency)
+        if dyn_notch_q < 200.0 && analysis.gyro_noise_rms.iter().all(|&n| n < 5.0) {
+            suggestions.push(TuningSuggestion {
+                category: "Dynamic Notch".to_string(),
+                title: "Dynamic notch Q is low".to_string(),
+                description: format!(
+                    "dyn_notch_q = {:.0}. Low Q means wider notches and more latency. Your noise is low enough to raise it.",
+                    dyn_notch_q
+                ),
+                recommendation: "Raise Q value for narrower, lower-latency notches.".to_string(),
+                cli_command: Some("set dyn_notch_q = 350".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // Check dyn notch range for high-KV motors
+        if dyn_notch_max < 500.0 && analysis.gyro_noise_high_throttle > analysis.gyro_noise_mid_throttle * 1.3 {
+            suggestions.push(TuningSuggestion {
+                category: "Dynamic Notch".to_string(),
+                title: "Dynamic notch max frequency may be too low".to_string(),
+                description: format!(
+                    "dyn_notch_max = {:.0}Hz. High-throttle noise ({:.1}) exceeds mid-throttle ({:.1}) - motor peaks may exceed current range.",
+                    dyn_notch_max, analysis.gyro_noise_high_throttle, analysis.gyro_noise_mid_throttle
+                ),
+                recommendation: "Raise dyn_notch_max_hz for high-KV motors or high-throttle use.".to_string(),
+                cli_command: Some("set dyn_notch_max_hz = 600".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === RPM FILTER ANALYSIS ===
+        let rpm_harmonics = get_val(&["rpm_filter_harmonics"]).unwrap_or(0.0) as i32;
+        let rpm_min_hz = get_val(&["rpm_filter_min_hz"]).unwrap_or(100.0);
+        let rpm_enabled = rpm_harmonics > 0;
+
+        if !rpm_enabled && analysis.motor_heat_risk > 40.0 {
+            suggestions.push(TuningSuggestion {
+                category: "RPM Filter".to_string(),
+                title: "RPM filter not enabled".to_string(),
+                description: format!(
+                    "Motor heat risk: {:.0}. RPM filter provides superior motor harmonic rejection with minimal latency.",
+                    analysis.motor_heat_risk
+                ),
+                recommendation: "Enable RPM filter with 3 harmonics (requires bidirectional DShot).".to_string(),
+                cli_command: Some("set dshot_bidir = ON\nset rpm_filter_harmonics = 3\nset rpm_filter_min_hz = 100".to_string()),
+                severity: Severity::Warning,
+            });
+        }
+
+        // Check if RPM harmonics can be reduced for lower latency
+        if rpm_harmonics > 2 && analysis.gyro_noise_rms.iter().all(|&n| n < 3.0) {
+            suggestions.push(TuningSuggestion {
+                category: "RPM Filter".to_string(),
+                title: "RPM filter may use fewer harmonics".to_string(),
+                description: format!(
+                    "rpm_filter_harmonics = {}. With low noise levels, 2 harmonics may suffice and reduce latency.",
+                    rpm_harmonics
+                ),
+                recommendation: "Consider reducing to 2 harmonics for lower latency.".to_string(),
+                cli_command: Some("set rpm_filter_harmonics = 2".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === D-MAX ANALYSIS ===
+        let d_max_gain = get_val(&["d_max_gain"]).unwrap_or(37.0);
+        let d_max_advance = get_val(&["d_max_advance"]).unwrap_or(20.0);
+
+        // D-Max tuning based on step response
+        let avg_bounce_back = (analysis.step_bounce_back[0] + analysis.step_bounce_back[1]) / 2.0;
+        if avg_bounce_back > 0.12 && d_max_gain < 50.0 {
+            suggestions.push(TuningSuggestion {
+                category: "D-Max".to_string(),
+                title: "Increase D-Max boost for propwash".to_string(),
+                description: format!(
+                    "Bounce-back: {:.1}%. D-Max gain = {:.0}. D-Max provides additional D during fast movements to counter propwash.",
+                    avg_bounce_back * 100.0, d_max_gain
+                ),
+                recommendation: "Raise D-Max gain for more propwash damping during quick stops.".to_string(),
+                cli_command: Some(format!("set d_max_gain = {}", (d_max_gain * 1.25).min(100.0) as i32)),
+                severity: Severity::Info,
+            });
+        }
+
+        // D-Max advance tuning for anticipation
+        if analysis.ff_effectiveness < 60.0 && d_max_advance < 30.0 {
+            suggestions.push(TuningSuggestion {
+                category: "D-Max".to_string(),
+                title: "Consider increasing D-Max advance".to_string(),
+                description: format!(
+                    "FF effectiveness: {:.0}%. D-Max advance = {:.0}. Higher advance uses setpoint to anticipate D-boost earlier.",
+                    analysis.ff_effectiveness, d_max_advance
+                ),
+                recommendation: "Increase D-Max advance for faster D-boost response to stick inputs.".to_string(),
+                cli_command: Some("set d_max_advance = 30".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === ANTI-GRAVITY P-BOOST ANALYSIS ===
+        let anti_gravity_gain = get_val(&["anti_gravity_gain"]).unwrap_or(80.0);
+        let anti_gravity_p_gain = get_val(&["anti_gravity_p_gain"]).unwrap_or(100.0);
+        let anti_gravity_cutoff = get_val(&["anti_gravity_cutoff_hz"]).unwrap_or(5.0);
+
+        // Check if low-throttle tracking is poor (punch-outs/dive recovery)
+        let low_throttle_error = (analysis.tracking_error_by_throttle[0][0] 
+            + analysis.tracking_error_by_throttle[1][0]) / 2.0;
+        
+        if low_throttle_error > 12.0 && analysis.throttle_variance > 15.0 {
+            if anti_gravity_p_gain < 120.0 {
+                suggestions.push(TuningSuggestion {
+                    category: "Anti-Gravity".to_string(),
+                    title: "Consider Anti-Gravity P-boost".to_string(),
+                    description: format!(
+                        "Low-throttle tracking error: {:.1}°/s with throttle variance {:.1}%. AG P-gain ({:.0}%) can help during transitions.",
+                        low_throttle_error, analysis.throttle_variance, anti_gravity_p_gain
+                    ),
+                    recommendation: "Increase anti_gravity_p_gain for better punch-out/dive tracking.".to_string(),
+                    cli_command: Some("set anti_gravity_p_gain = 120".to_string()),
+                    severity: Severity::Info,
+                });
+            }
+
+            if anti_gravity_gain < 100.0 {
+                suggestions.push(TuningSuggestion {
+                    category: "Anti-Gravity".to_string(),
+                    title: "Increase Anti-Gravity I-term boost".to_string(),
+                    description: format!(
+                        "Anti-Gravity gain = {:.0}. With significant throttle changes, higher AG helps I-term during transitions.",
+                        anti_gravity_gain
+                    ),
+                    recommendation: "Raise Anti-Gravity gain for aggressive throttle flying.".to_string(),
+                    cli_command: Some("set anti_gravity_gain = 100".to_string()),
+                    severity: Severity::Info,
+                });
+            }
+        }
+
+        // === I-TERM RELAX OPTIMIZATION ===
+        let iterm_relax = headers.get("iterm_relax").map(|s| s.as_str()).unwrap_or("RP");
+        let iterm_relax_type = headers.get("iterm_relax_type").map(|s| s.as_str()).unwrap_or("1");
+        let iterm_relax_cutoff = get_val(&["iterm_relax_cutoff"]).unwrap_or(15.0);
+
+        if analysis.iterm_windup_events > 80 {
+            let suggested_type = if analysis.avg_throttle_pct > 55.0 { "SETPOINT" } else { "GYRO" };
+            let suggested_cutoff = if analysis.avg_throttle_pct > 55.0 { 20 } else { 12 };
+            let flying_style = if analysis.avg_throttle_pct > 55.0 { "aggressive" } else { "smooth" };
+
+            suggestions.push(TuningSuggestion {
+                category: "I-Term Relax".to_string(),
+                title: format!("Optimize I-term relax for {} flying", flying_style),
+                description: format!(
+                    "Current: type={}, cutoff={:.0}. Detected {} I-term windup events. Average throttle: {:.0}%.",
+                    iterm_relax_type, iterm_relax_cutoff, analysis.iterm_windup_events, analysis.avg_throttle_pct
+                ),
+                recommendation: format!(
+                    "For {} flying style, {} type with cutoff {} works better.",
+                    flying_style, suggested_type, suggested_cutoff
+                ),
+                cli_command: Some(format!(
+                    "set iterm_relax_type = {}\nset iterm_relax_cutoff = {}",
+                    suggested_type, suggested_cutoff
+                )),
+                severity: if analysis.iterm_windup_events > 150 { Severity::Warning } else { Severity::Info },
+            });
+        }
+
+        // Check if I-term relax is disabled for yaw
+        if iterm_relax == "RP" && analysis.iterm_drift[2].abs() > 30.0 {
+            suggestions.push(TuningSuggestion {
+                category: "I-Term Relax".to_string(),
+                title: "Enable I-term relax for Yaw".to_string(),
+                description: format!(
+                    "I-term relax only on RP. Yaw I-term drift: {:.1}. Yaw can benefit from relax during fast spins.",
+                    analysis.iterm_drift[2]
+                ),
+                recommendation: "Enable I-term relax on all axes for less yaw I-term buildup.".to_string(),
+                cli_command: Some("set iterm_relax = RPY".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === TPA ANALYSIS ===
+        let tpa_mode = headers.get("tpa_mode").map(|s| s.as_str()).unwrap_or("1");
+        let tpa_rate = get_val(&["tpa_rate"]).unwrap_or(65.0);
+        let tpa_breakpoint = get_val(&["tpa_breakpoint"]).unwrap_or(1350.0);
+        let tpa_low_rate = get_val(&["tpa_low_rate"]).unwrap_or(20.0);
+        let tpa_low_breakpoint = get_val(&["tpa_low_breakpoint"]).unwrap_or(1050.0);
+
+        // High-throttle tracking issues - TPA may be too aggressive
+        let high_throttle_error = (analysis.tracking_error_by_throttle[0][2] 
+            + analysis.tracking_error_by_throttle[1][2]) / 2.0;
+        
+        if high_throttle_error > 18.0 && tpa_rate > 60.0 {
+            suggestions.push(TuningSuggestion {
+                category: "TPA".to_string(),
+                title: "TPA may be too aggressive".to_string(),
+                description: format!(
+                    "High-throttle tracking error: {:.1}°/s. TPA rate = {:.0}% starting at {:.0}µs. PIDs may be cut too much.",
+                    high_throttle_error, tpa_rate, tpa_breakpoint
+                ),
+                recommendation: "Lower TPA rate or raise breakpoint for better high-throttle control.".to_string(),
+                cli_command: Some(format!(
+                    "set tpa_rate = {}\nset tpa_breakpoint = {}",
+                    (tpa_rate * 0.75) as i32, (tpa_breakpoint + 100.0).min(1500.0) as i32
+                )),
+                severity: Severity::Warning,
+            });
+        }
+
+        // TPA Low Rate suggestion for low-throttle oscillations
+        if analysis.gyro_noise_low_throttle > analysis.gyro_noise_mid_throttle * 1.3 && tpa_low_rate < 10.0 {
+            suggestions.push(TuningSuggestion {
+                category: "TPA".to_string(),
+                title: "Consider TPA Low for low-throttle noise".to_string(),
+                description: format!(
+                    "Low-throttle noise ({:.1}) exceeds mid-throttle ({:.1}). TPA Low can reduce P/D at idle to prevent oscillations.",
+                    analysis.gyro_noise_low_throttle, analysis.gyro_noise_mid_throttle
+                ),
+                recommendation: "Enable TPA Low to reduce gains at low throttle.".to_string(),
+                cli_command: Some("set tpa_low_rate = 20\nset tpa_low_breakpoint = 1050".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === DYNAMIC IDLE ANALYSIS ===
+        let dyn_idle_min_rpm = get_val(&["dyn_idle_min_rpm"]).unwrap_or(0.0);
+        let dyn_idle_p_gain = get_val(&["dyn_idle_p_gain"]).unwrap_or(50.0);
+        let dyn_idle_i_gain = get_val(&["dyn_idle_i_gain"]).unwrap_or(50.0);
+        let dyn_idle_d_gain = get_val(&["dyn_idle_d_gain"]).unwrap_or(50.0);
+
+        if analysis.propwash_severity > 25.0 && dyn_idle_min_rpm < 20.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Dynamic Idle".to_string(),
+                title: "Enable Dynamic Idle for propwash".to_string(),
+                description: format!(
+                    "Propwash severity: {:.0}. Dynamic idle keeps motors spinning during descents, reducing propwash significantly.",
+                    analysis.propwash_severity
+                ),
+                recommendation: "Enable dynamic idle with 25-35 RPM minimum for cleaner descents.".to_string(),
+                cli_command: Some(
+                    "set dyn_idle_min_rpm = 30\nset dyn_idle_p_gain = 50\nset dyn_idle_i_gain = 50\nset dyn_idle_d_gain = 50".to_string()
+                ),
+                severity: Severity::Warning,
+            });
+        } else if dyn_idle_min_rpm > 0.0 && analysis.propwash_severity > 40.0 {
+            // Already enabled but still propwash - suggest tuning
+            suggestions.push(TuningSuggestion {
+                category: "Dynamic Idle".to_string(),
+                title: "Tune Dynamic Idle for better propwash".to_string(),
+                description: format!(
+                    "Dynamic idle enabled at {} RPM but propwash severity still {:.0}. May need higher RPM or gain tuning.",
+                    dyn_idle_min_rpm as i32, analysis.propwash_severity
+                ),
+                recommendation: "Increase minimum RPM or adjust dynamic idle gains.".to_string(),
+                cli_command: Some(format!(
+                    "set dyn_idle_min_rpm = {}\nset dyn_idle_p_gain = 60\nset dyn_idle_i_gain = 60",
+                    (dyn_idle_min_rpm + 10.0).min(50.0) as i32
+                )),
+                severity: Severity::Info,
+            });
+        }
+
+        // === FEEDFORWARD JITTER OPTIMIZATION ===
+        let ff_jitter = get_val(&["feedforward_jitter_factor"]).unwrap_or(7.0);
+        let ff_smooth = get_val(&["feedforward_smooth_factor"]).unwrap_or(25.0);
+        let ff_boost = get_val(&["feedforward_boost"]).unwrap_or(15.0);
+
+        if analysis.setpoint_jitter > 8.0 {
+            let suggested_jitter = if analysis.setpoint_jitter > 15.0 { 15 } else { 12 };
+            
+            if ff_jitter < suggested_jitter as f32 {
+                suggestions.push(TuningSuggestion {
+                    category: "Feedforward".to_string(),
+                    title: "Increase FF jitter reduction".to_string(),
+                    description: format!(
+                        "Setpoint jitter: {:.1}. Current ff_jitter_factor = {:.0}. High RC noise causes hot motors and oscillations.",
+                        analysis.setpoint_jitter, ff_jitter
+                    ),
+                    recommendation: "Raise feedforward_jitter_factor to reduce motor heat from RC noise.".to_string(),
+                    cli_command: Some(format!("set feedforward_jitter_factor = {}", suggested_jitter)),
+                    severity: Severity::Warning,
+                });
+            }
+        }
+
+        // FF Smooth factor optimization
+        if analysis.propwash_severity > 30.0 && ff_smooth < 35.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Feedforward".to_string(),
+                title: "Increase FF smoothing for propwash".to_string(),
+                description: format!(
+                    "Propwash severity: {:.0}. feedforward_smooth_factor = {:.0}. Higher smoothing can reduce propwash oscillations.",
+                    analysis.propwash_severity, ff_smooth
+                ),
+                recommendation: "Increase feedforward smoothing to soften step transitions.".to_string(),
+                cli_command: Some("set feedforward_smooth_factor = 45".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // FF Boost suggestion for sluggish response
+        let avg_rise_time = (analysis.step_rise_time[0] + analysis.step_rise_time[1]) / 2.0;
+        if avg_rise_time > 35.0 && ff_boost < 20.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Feedforward".to_string(),
+                title: "Consider increasing FF boost".to_string(),
+                description: format!(
+                    "Rise time: {:.1}ms. feedforward_boost = {:.0}. FF boost adds acceleration component for snappier response.",
+                    avg_rise_time, ff_boost
+                ),
+                recommendation: "Increase feedforward_boost for faster initial response.".to_string(),
+                cli_command: Some("set feedforward_boost = 20".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === YAW FEEDFORWARD HOLD ===
+        let ff_yaw_hold_gain = get_val(&["feedforward_yaw_hold_gain"]).unwrap_or(15.0);
+        let ff_yaw_hold_time = get_val(&["feedforward_yaw_hold_time"]).unwrap_or(100.0);
+
+        // Yaw drift detection
+        if analysis.iterm_drift[2].abs() > 25.0 && ff_yaw_hold_gain < 10.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Yaw Feedforward".to_string(),
+                title: "Enable yaw feedforward hold".to_string(),
+                description: format!(
+                    "Yaw I-term drift: {:.1}. Yaw FF hold helps maintain yaw authority during sustained rotations.",
+                    analysis.iterm_drift[2]
+                ),
+                recommendation: "Enable feedforward_yaw_hold for better sustained yaw control.".to_string(),
+                cli_command: Some("set feedforward_yaw_hold_gain = 15\nset feedforward_yaw_hold_time = 100".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === CRASH RECOVERY & SAFETY ===
+        let crash_recovery = headers.get("crash_recovery").map(|s| s.as_str()).unwrap_or("0");
+        let ez_landing_threshold = get_val(&["ez_landing_threshold"]).unwrap_or(25.0);
+        let landing_disarm = get_val(&["landing_disarm_threshold"]).unwrap_or(0.0);
+
+        // Suggest crash recovery for high-risk flying
+        if crash_recovery == "0" || crash_recovery.to_lowercase() == "off" {
+            let high_risk = analysis.motor_saturation_pct > 15.0 
+                || analysis.gyro_noise_rms.iter().any(|&n| n > 50.0);
+            
+            if high_risk {
+                suggestions.push(TuningSuggestion {
+                    category: "Safety".to_string(),
+                    title: "Consider enabling Crash Recovery".to_string(),
+                    description: "High motor saturation or noise detected. Crash recovery helps regain control after impacts.".to_string(),
+                    recommendation: "Enable crash recovery for safer flying in confined spaces.".to_string(),
+                    cli_command: Some(
+                        "set crash_recovery = ON\nset crash_recovery_angle = 10\nset crash_recovery_rate = 100".to_string()
+                    ),
+                    severity: Severity::Info,
+                });
+            }
+        }
+
+        // Landing disarm suggestion for pilots who land frequently
+        if landing_disarm < 50.0 && analysis.avg_throttle_pct < 40.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Safety".to_string(),
+                title: "Consider landing disarm threshold".to_string(),
+                description: "Low average throttle suggests frequent landing/hovering. Auto-disarm on landing impact can prevent prop injuries.".to_string(),
+                recommendation: "Set landing_disarm_threshold for automatic disarm on landing impact.".to_string(),
+                cli_command: Some("set landing_disarm_threshold = 100".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === THRUST LINEARIZATION ===
+        let thrust_linear = get_val(&["thrust_linear", "thrustLinearization"]).unwrap_or(0.0);
+        
+        // Detect non-linear throttle response (poor tracking at varying throttle)
+        let throttle_tracking_variance = (high_throttle_error - low_throttle_error).abs();
+        if throttle_tracking_variance > 10.0 && thrust_linear < 20.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Motor Linearization".to_string(),
+                title: "Consider thrust linearization".to_string(),
+                description: format!(
+                    "Tracking error varies by {:.1}°/s across throttle range. Thrust linearization compensates for motor non-linearity.",
+                    throttle_tracking_variance
+                ),
+                recommendation: "For whoops or brushless with non-linear motors, add thrust linearization.".to_string(),
+                cli_command: Some("set thrust_linear = 20".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === VBAT SAG COMPENSATION ===
+        let vbat_sag = get_val(&["vbat_sag_compensation"]).unwrap_or(0.0);
+        
+        // If flight is long and tracking degrades at end (heuristic: high variance)
+        if flight_duration > 120.0 && vbat_sag < 50.0 && analysis.throttle_variance > 20.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Battery".to_string(),
+                title: "Consider VBat sag compensation".to_string(),
+                description: format!(
+                    "Flight duration: {:.0}s with high throttle variance. VBat sag compensation maintains consistent feel as battery drains.",
+                    flight_duration
+                ),
+                recommendation: "Enable vbat_sag_compensation for consistent power throughout battery.".to_string(),
+                cli_command: Some("set vbat_sag_compensation = 100".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === ABSOLUTE CONTROL ===
+        let abs_control_gain = get_val(&["abs_control_gain"]).unwrap_or(0.0);
+        
+        // Suggest abs control for precision flying (low throttle variance = cinematic)
+        if analysis.throttle_variance < 10.0 && abs_control_gain < 5.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Absolute Control".to_string(),
+                title: "Consider absolute control for precision".to_string(),
+                description: "Smooth flying style detected. Absolute control provides path correction for drift-free cinematic shots.".to_string(),
+                recommendation: "Enable abs_control for better position holding during smooth flying.".to_string(),
+                cli_command: Some("set abs_control_gain = 10".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === INTEGRATED YAW ===
+        let integrated_yaw = headers.get("use_integrated_yaw").map(|s| s != "0").unwrap_or(false);
+        let integrated_yaw_relax = get_val(&["integrated_yaw_relax"]).unwrap_or(200.0);
+
+        // Yaw tracking issues with tail-heavy quads
+        if !integrated_yaw && analysis.tracking_error_rms[2] > 25.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Yaw Control".to_string(),
+                title: "Consider integrated yaw".to_string(),
+                description: format!(
+                    "Yaw tracking error: {:.1}°/s. Integrated yaw improves yaw authority, especially on quads with high yaw inertia.",
+                    analysis.tracking_error_rms[2]
+                ),
+                recommendation: "Enable integrated yaw for better yaw response.".to_string(),
+                cli_command: Some("set use_integrated_yaw = ON\nset integrated_yaw_relax = 200".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === MOTOR OUTPUT LIMIT ===
+        let motor_output_limit = get_val(&["motor_output_limit"]).unwrap_or(100.0);
+        
+        if analysis.motor_saturation_pct > 25.0 && motor_output_limit > 95.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Motor Limit".to_string(),
+                title: "Frequent motor saturation detected".to_string(),
+                description: format!(
+                    "Motors at 100% for {:.1}% of flight. Consider if your tune is too aggressive or quad is underpowered.",
+                    analysis.motor_saturation_pct
+                ),
+                recommendation: "If intentional (racing), no action needed. Otherwise, lower PID gains or check prop/motor sizing.".to_string(),
+                cli_command: None,
+                severity: if analysis.motor_saturation_pct > 40.0 { Severity::Warning } else { Severity::Info },
+            });
+        }
+
+        // === THROTTLE BOOST ===
+        let throttle_boost = get_val(&["throttle_boost"]).unwrap_or(5.0);
+        let throttle_boost_cutoff = get_val(&["throttle_boost_cutoff"]).unwrap_or(15.0);
+
+        if low_throttle_error > 15.0 && throttle_boost < 8.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Throttle Boost".to_string(),
+                title: "Consider increasing throttle boost".to_string(),
+                description: format!(
+                    "Low-throttle tracking error: {:.1}°/s. Throttle boost ({:.0}) adds immediate motor response during throttle changes.",
+                    low_throttle_error, throttle_boost
+                ),
+                recommendation: "Increase throttle_boost for snappier throttle response.".to_string(),
+                cli_command: Some("set throttle_boost = 10".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
+        // === FILTER TYPE OPTIMIZATION ===
+        let dterm_lpf1_type = headers.get("dterm_lpf1_type").map(|s| s.as_str()).unwrap_or("0");
+        let gyro_lpf1_type = headers.get("gyro_lpf1_type").map(|s| s.as_str()).unwrap_or("0");
+
+        // Suggest PT2/PT3 for better phase response if latency is acceptable
+        if dterm_lpf1_type == "0" && analysis.avg_latency_ms < 8.0 && max_dterm_noise > 40.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Filter Type".to_string(),
+                title: "Consider PT2/PT3 D-term filter".to_string(),
+                description: format!(
+                    "D-term using PT1 filter. D-term noise: {:.1}. PT2/PT3 provides steeper rolloff with similar latency for cleaner D.",
+                    max_dterm_noise
+                ),
+                recommendation: "Try PT2 or PT3 filter type for D-term for better noise rejection.".to_string(),
+                cli_command: Some("set dterm_lpf1_type = PT2".to_string()),
+                severity: Severity::Info,
+            });
+        }
+
         // === GENERAL TIPS (if no major issues) ===
         if suggestions.is_empty() {
             suggestions.push(TuningSuggestion {
@@ -1612,6 +2147,11 @@ impl SuggestionsTab {
         let tpa_mode = get_or_na(&["tpa_mode"]);
         let tpa_rate = get_or_na(&["tpa_rate"]);
         let tpa_breakpoint = get_or_na(&["tpa_breakpoint"]);
+        let tpa_low_rate = get_or_na(&["tpa_low_rate"]);
+        let tpa_low_breakpoint = get_or_na(&["tpa_low_breakpoint"]);
+
+        let anti_gravity_p = get_or_na(&["anti_gravity_p_gain"]);
+        let anti_gravity_cutoff = get_or_na(&["anti_gravity_cutoff_hz"]);
 
         let throttle_boost = get_or_na(&["throttle_boost"]);
         let motor_limit = get_or_na(&["motor_output_limit"]);
@@ -1620,7 +2160,14 @@ impl SuggestionsTab {
         let thrust_linear = get_or_na(&["thrust_linear"]);
 
         let integrated_yaw = get_or_na(&["use_integrated_yaw"]);
+        let integrated_yaw_relax = get_or_na(&["integrated_yaw_relax"]);
         let abs_control = get_or_na(&["abs_control_gain"]);
+        let crash_recovery = get_or_na(&["crash_recovery"]);
+        let ez_landing = get_or_na(&["ez_landing_threshold"]);
+
+        // Feedforward Yaw Hold
+        let ff_yaw_hold_gain = get_or_na(&["feedforward_yaw_hold_gain"]);
+        let ff_yaw_hold_time = get_or_na(&["feedforward_yaw_hold_time"]);
 
         // ========== Rates ==========
         let rates_type = get_or_na(&["rates_type"]);
@@ -1665,17 +2212,22 @@ impl SuggestionsTab {
                  D-Min: {}  |  FF Weight: {}\n\n\
                  ══════════ FEEDFORWARD ══════════\n\
                  Jitter: {} | Smooth: {} | Averaging: {} | Boost: {}\n\
-                 Max Rate Limit: {} | Transition: {}\n\n\
+                 Max Rate Limit: {} | Transition: {}\n\
+                 Yaw Hold: Gain={}, Time={}ms\n\n\
                  ══════════ I-TERM ══════════\n\
                  Relax: {} (Type={}, Cutoff={}) | Rotation: {}\n\n\
                  ══════════ D-MAX & ANTI-GRAVITY ══════════\n\
-                 Anti-Gravity Gain: {} | D-Max Gain: {} | D-Max Advance: {}\n\n\
+                 Anti-Gravity: Gain={} | P-Gain={} | Cutoff={}Hz\n\
+                 D-Max Gain: {} | D-Max Advance: {}\n\n\
                  ══════════ TPA ══════════\n\
-                 Mode: {} | Rate: {}% | Breakpoint: {}µs\n\n\
+                 Mode: {} | Rate: {}% | Breakpoint: {}µs\n\
+                 TPA Low: Rate={}% | Breakpoint={}µs\n\n\
                  ══════════ MOTOR & THROTTLE ══════════\n\
                  Throttle Boost: {} | Motor Limit: {}% | Dynamic Idle: {} RPM\n\
                  VBat Sag: {}% | Thrust Linear: {}%\n\
-                 Integrated Yaw: {} | Abs Control: {}\n\n\
+                 Integrated Yaw: {} (Relax={}) | Abs Control: {}\n\n\
+                 ══════════ SAFETY ══════════\n\
+                 Crash Recovery: {} | EZ Landing: {}\n\n\
                  ══════════ RATES ══════════\n\
                  Type: {} | RC Rates: {} | Rates: {} | Expo: {}\n\
                  Throttle Limit: {}%\n\n\
@@ -1701,23 +2253,32 @@ impl SuggestionsTab {
                 ff_boost,
                 ff_max_rate,
                 ff_transition,
+                ff_yaw_hold_gain,
+                ff_yaw_hold_time,
                 iterm_relax,
                 iterm_relax_type,
                 iterm_relax_cutoff,
                 iterm_rotation,
                 anti_gravity,
+                anti_gravity_p,
+                anti_gravity_cutoff,
                 d_max_gain,
                 d_max_advance,
                 tpa_mode,
                 tpa_rate,
                 tpa_breakpoint,
+                tpa_low_rate,
+                tpa_low_breakpoint,
                 throttle_boost,
                 motor_limit,
                 dyn_idle,
                 vbat_sag,
                 thrust_linear,
                 integrated_yaw,
+                integrated_yaw_relax,
                 abs_control,
+                crash_recovery,
+                ez_landing,
                 rates_type,
                 rc_rates,
                 rates,
