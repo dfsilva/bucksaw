@@ -41,23 +41,26 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext, path: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
-        
+
         // Install Phosphor icons font with high priority for icon glyphs
         let mut fonts = egui::FontDefinitions::default();
-        
+
         // Add Phosphor font data
         fonts.font_data.insert(
             "phosphor".into(),
             egui_phosphor::Variant::Regular.font_data(),
         );
-        
+
         // Insert Phosphor font at the beginning of the Proportional family
         // so it takes precedence for icon glyphs (PUA characters)
         if let Some(font_keys) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
             font_keys.insert(0, "phosphor".into());
         }
-        
+
         cc.egui_ctx.set_fonts(fonts);
+
+        // Log app start
+        analytics::log_app_started();
 
         let open_file_dialog = Some(OpenFileDialog::new(path));
         Self {
@@ -172,7 +175,11 @@ impl eframe::App for App {
                 ui.set_enabled(enabled);
                 ui.horizontal_centered(|ui| {
                     if ui
-                        .button(if self.left_panel_open { icons::CARET_LEFT } else { icons::LIST })
+                        .button(if self.left_panel_open {
+                            icons::CARET_LEFT
+                        } else {
+                            icons::LIST
+                        })
                         .clicked()
                     {
                         self.left_panel_open = !self.left_panel_open;
@@ -186,10 +193,7 @@ impl eframe::App for App {
                     } else {
                         format!("{} Open File", icons::FOLDER_OPEN)
                     };
-                    if ui
-                        .button(&open_label)
-                        .clicked()
-                    {
+                    if ui.button(&open_label).clicked() {
                         self.open_file_dialog = Some(OpenFileDialog::new(None));
                         ctx.request_repaint();
                     }
@@ -258,8 +262,11 @@ impl eframe::App for App {
                             .show(ui, |ui| {
                                 ui.horizontal(|ui| {
                                     // Expand/collapse button
-                                    let expand_icon =
-                                        if opened_file.expanded { icons::CARET_DOWN } else { icons::CARET_RIGHT };
+                                    let expand_icon = if opened_file.expanded {
+                                        icons::CARET_DOWN
+                                    } else {
+                                        icons::CARET_RIGHT
+                                    };
                                     if ui.small_button(expand_icon).clicked() {
                                         toggle_expand = Some(file_idx);
                                     }
@@ -317,7 +324,10 @@ impl eframe::App for App {
                                                     ui.with_layout(
                                                         Layout::right_to_left(egui::Align::Center),
                                                         |ui| {
-                                                            if ui.small_button(icons::ARROW_RIGHT).clicked() {
+                                                            if ui
+                                                                .small_button(icons::ARROW_RIGHT)
+                                                                .clicked()
+                                                            {
                                                                 new_selection = Some(Selection {
                                                                     file_index: file_idx,
                                                                     flight_index: flight_idx,
