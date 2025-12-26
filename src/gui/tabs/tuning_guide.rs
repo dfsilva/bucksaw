@@ -70,7 +70,7 @@ impl TuningGuideTab {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🎓 Betaflight Tuning Guide");
+        ui.heading("▷ Betaflight Tuning Guide");
         ui.label("Follow this interactive workflow to get a locked-in tune.");
         ui.add_space(10.0);
 
@@ -88,7 +88,7 @@ impl TuningGuideTab {
                 RichText::new(format!("Step {} of {}", self.current_step + 1, STEPS.len()))
                     .strong(),
             );
-            if ui.button("Next ➡").clicked() && self.current_step < STEPS.len() - 1 {
+            if ui.button("Next →").clicked() && self.current_step < STEPS.len() - 1 {
                 self.current_step += 1;
             }
         });
@@ -109,7 +109,7 @@ impl TuningGuideTab {
                 ui.label(RichText::new(step.description).size(16.0));
                 ui.add_space(16.0);
 
-                ui.label(RichText::new("📋 Action Items:").strong());
+                ui.label(RichText::new("≡ Action Items:").strong());
                 for item in step.action_items {
                     ui.horizontal(|ui| {
                         ui.label("•");
@@ -118,7 +118,7 @@ impl TuningGuideTab {
                 }
 
                 ui.add_space(16.0);
-                ui.label(RichText::new("🛠 Recommended Tools:").strong());
+                ui.label(RichText::new("⚒ Recommended Tools:").strong());
                 ui.horizontal(|ui| {
                     for tool in step.recommended_tools {
                         ui.label(RichText::new(*tool).code().color(Color32::YELLOW));

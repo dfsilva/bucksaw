@@ -430,7 +430,7 @@ impl AnomaliesTab {
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<NavigationAction> {
         let mut navigation_request: Option<NavigationAction> = None;
 
-        ui.heading("🚨 Anomaly Detection");
+        ui.heading("⚠ Anomaly Detection");
         ui.add_space(8.0);
 
         if self.events.is_empty() {
@@ -449,7 +449,7 @@ impl AnomaliesTab {
                 ui.label(RichText::new("Timeline").strong());
                 ui.add_space(16.0);
                 ui.label(
-                    RichText::new("💡 Click an event below to jump to that time in the Plot tab")
+                    RichText::new("★ Click an event below to jump to that time in the Plot tab")
                         .weak()
                         .small(),
                 );
@@ -504,7 +504,7 @@ impl AnomaliesTab {
                         ui.horizontal(|ui| {
                             // Jump to button - clickable!
                             if ui
-                                .button("🎯 Jump")
+                                .button("▸ Jump")
                                 .on_hover_text(format!(
                                     "View this event at {:.1}s in Plot tab",
                                     event.start_time
@@ -543,13 +543,13 @@ impl AnomaliesTab {
                         ui.indent("anomaly_details", |ui| {
                             ui.add_space(4.0);
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("❓ Analysis:").strong().size(11.0));
+                                ui.label(RichText::new("? Analysis:").strong().size(11.0));
                                 ui.label(
                                     RichText::new(event.anomaly_type.explanation()).size(11.0),
                                 );
                             });
                             ui.horizontal(|ui| {
-                                ui.label(RichText::new("🛠 Fix:").strong().size(11.0));
+                                ui.label(RichText::new("⚒ Fix:").strong().size(11.0));
                                 ui.label(
                                     RichText::new(event.anomaly_type.recommendation())
                                         .size(11.0)

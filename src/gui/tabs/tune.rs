@@ -305,11 +305,11 @@ impl TuneTab {
             ui.separator();
 
             // Overlay mode toggle
-            ui.checkbox(&mut self.overlay_mode, "📊 Overlay")
+            ui.checkbox(&mut self.overlay_mode, "≡ Overlay")
                 .on_hover_text("Compare all axes on a single plot");
 
             // Ideal response controls
-            ui.checkbox(&mut self.show_ideal_response, "📈 Ideal")
+            ui.checkbox(&mut self.show_ideal_response, "∿ Ideal")
                 .on_hover_text("Show ideal first-order step response");
 
             if self.show_ideal_response {

@@ -1077,7 +1077,7 @@ impl FilterTab {
             
             if avg_reduction < 50.0 {
                 recommendations.push((
-                    "⚠️",
+                    "⚠",
                     "Low noise reduction detected",
                     "Consider lowering gyro LPF cutoff frequencies or enabling dynamic filtering",
                 ));
@@ -1087,7 +1087,7 @@ impl FilterTab {
             let avg_dterm_noise: f32 = self.noise_analysis.dterm_noise_rms.iter().take(2).sum::<f32>() / 2.0;
             if avg_dterm_noise > 50.0 {
                 recommendations.push((
-                    "⚠️", 
+                    "⚠", 
                     "High D-term noise",
                     "Consider lowering D-term LPF cutoff or reducing D gains",
                 ));
@@ -1096,7 +1096,7 @@ impl FilterTab {
             // Check RPM filter
             if !self.filter_settings.rpm_filter_enabled() && self.motor_rpm.is_some() {
                 recommendations.push((
-                    "💡",
+                    "★",
                     "RPM filter not enabled",
                     "Enable RPM filter for better motor noise rejection (requires bidirectional DShot)",
                 ));
@@ -1105,7 +1105,7 @@ impl FilterTab {
             // Check dynamic filtering
             if !self.filter_settings.gyro_dyn_lpf_enabled() {
                 recommendations.push((
-                    "💡",
+                    "★",
                     "Static gyro LPF in use",
                     "Consider enabling dynamic gyro LPF for better performance across throttle range",
                 ));
@@ -1114,7 +1114,7 @@ impl FilterTab {
             // Good configuration check
             if recommendations.is_empty() {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✅").size(16.0));
+                    ui.label(RichText::new("✓").size(16.0));
                     ui.label("Filter configuration looks good! No major issues detected.");
                 });
             } else {

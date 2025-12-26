@@ -30,9 +30,9 @@ impl Severity {
 
     fn icon(&self) -> &'static str {
         match self {
-            Severity::Info => "ℹ️",
-            Severity::Warning => "⚠️",
-            Severity::Critical => "🔴",
+            Severity::Info => "ℹ",
+            Severity::Warning => "⚠",
+            Severity::Critical => "●",
         }
     }
 }
@@ -1789,12 +1789,12 @@ impl SuggestionsTab {
         }
 
         egui::ScrollArea::vertical().show(ui, |ui| {
-            ui.heading("🔧 PID & Filter Tuning Suggestions");
+            ui.heading("⚒ PID & Filter Tuning Suggestions");
             ui.add_space(8.0);
 
             // === AI ANALYSIS SECTION ===
             ui.add_space(8.0);
-            egui::CollapsingHeader::new(RichText::new("🤖 AI Analysis (OpenRouter)").strong())
+            egui::CollapsingHeader::new(RichText::new("⌘ AI Analysis (OpenRouter)").strong())
                 .default_open(self.ai_settings_open)
                 .show(ui, |ui| {
                     self.ai_settings_open = true;
@@ -1813,7 +1813,7 @@ impl SuggestionsTab {
                     // Model filter and selection
                     ui.add_space(8.0);
                     ui.horizontal(|ui| {
-                        ui.label("🔍 Filter:");
+                        ui.label("⌕ Filter:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.model_filter)
                                 .hint_text("Type to filter models...")
@@ -1879,7 +1879,7 @@ impl SuggestionsTab {
 
                         // Save Settings button
                         if ui
-                            .button("💾 Save Settings")
+                            .button("↓ Save Settings")
                             .on_hover_text("Save API key and model selection for next session")
                             .clicked()
                         {
@@ -1922,7 +1922,7 @@ impl SuggestionsTab {
                             && self.selected_model_id.is_some();
 
                         if ui
-                            .add_enabled(can_analyze, egui::Button::new("🚀 Analyze with AI"))
+                            .add_enabled(can_analyze, egui::Button::new("▸ Analyze with AI"))
                             .clicked()
                         {
                             // Build metrics from analysis
@@ -1943,7 +1943,7 @@ impl SuggestionsTab {
                                 Some(OpenRouterClient::analyze_async(api_key, model_id, metrics));
                         }
 
-                        if ui.button("🔄 Refresh Models").clicked() && !self.models_loading {
+                        if ui.button("↻ Refresh Models").clicked() && !self.models_loading {
                             self.models_loading = true;
                             self.models_receiver = Some(OpenRouterClient::fetch_models_async());
                         }
@@ -1957,7 +1957,7 @@ impl SuggestionsTab {
                     // Show error if any
                     if let Some(ref err) = self.ai_error {
                         ui.add_space(8.0);
-                        ui.colored_label(Color32::RED, format!("❌ {}", err));
+                        ui.colored_label(Color32::RED, format!("× {}", err));
                     }
 
                     // Show AI response
@@ -1993,7 +1993,7 @@ impl SuggestionsTab {
                                                             .color(Color32::LIGHT_GREEN),
                                                     );
                                                     if ui
-                                                        .small_button("📋")
+                                                        .small_button("⎘")
                                                         .on_hover_text("Copy")
                                                         .clicked()
                                                     {
@@ -2020,11 +2020,11 @@ impl SuggestionsTab {
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("📋 Copy Response").clicked() {
+                            if ui.button("⎘ Copy Response").clicked() {
                                 ui.output_mut(|o| o.copied_text = response.clone());
                                 analytics::log_ai_response_copied();
                             }
-                            if ui.button("🗑 Clear").clicked() {
+                            if ui.button("✗ Clear").clicked() {
                                 clear_ai_response = true;
                             }
                         });
@@ -2039,7 +2039,7 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === QUICK ACTIONS PANEL ===
-            ui.label(RichText::new("🚦 Quick Tuning Status").strong().size(16.0));
+            ui.label(RichText::new("▦ Quick Tuning Status").strong().size(16.0));
             ui.add_space(4.0);
 
             // Calculate status for each tuning area
@@ -2075,7 +2075,7 @@ impl SuggestionsTab {
 
             ui.add_space(4.0);
             ui.label(
-                RichText::new("🟢 = Good  🟡 = Needs Attention  🔴 = Critical")
+                RichText::new("● = Good  ○ = Needs Attention  ■ = Critical")
                     .weak()
                     .small(),
             );
@@ -2085,7 +2085,7 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === RULE-BASED SUGGESTIONS ===
-            ui.label(RichText::new("📋 Automated Analysis").strong().size(16.0));
+            ui.label(RichText::new("≡ Automated Analysis").strong().size(16.0));
             ui.label("Based on analysis of your flight log, here are tuning recommendations:");
             ui.add_space(8.0);
 
@@ -2093,8 +2093,8 @@ impl SuggestionsTab {
             ui.horizontal(|ui| {
                 // Copy All button - groups by severity for safe application order
                 if ui
-                    .button("📋 Copy All CLI Commands")
-                    .on_hover_text("Copy all CLI commands to clipboard (Critical → Warning → Info)")
+                    .button("⎘ Copy All CLI Commands")
+                    .on_hover_text("Copy all CLI commands to clipboard (Critical -> Warning -> Info)")
                     .clicked()
                 {
                     let all_commands = self.generate_cli_export();
@@ -2117,7 +2117,7 @@ impl SuggestionsTab {
                     .count();
                 if critical_count > 0 {
                     if ui
-                        .button(format!("🔴 Copy Critical Only ({})", critical_count))
+                        .button(format!("● Copy Critical Only ({})", critical_count))
                         .on_hover_text("Copy only critical priority commands")
                         .clicked()
                     {
@@ -2150,7 +2150,7 @@ impl SuggestionsTab {
             // Collapsible CLI Snippet Preview
             if self.suggestions.iter().any(|s| s.cli_command.is_some()) {
                 ui.add_space(8.0);
-                egui::CollapsingHeader::new(RichText::new("📄 CLI Commands Preview").size(13.0))
+                egui::CollapsingHeader::new(RichText::new("≡ CLI Commands Preview").size(13.0))
                     .default_open(false)
                     .show(ui, |ui| {
                         let preview = self.generate_cli_export();
@@ -2208,7 +2208,7 @@ impl SuggestionsTab {
 
                         ui.add_space(4.0);
                         ui.horizontal(|ui| {
-                            ui.label(RichText::new("💡 ").size(14.0));
+                            ui.label(RichText::new("★ ").size(14.0));
                             ui.label(RichText::new(&suggestion.recommendation).italics());
                         });
 
@@ -2231,7 +2231,7 @@ impl SuggestionsTab {
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
                                                     if ui
-                                                        .button("📋 Copy")
+                                                        .button("⎘ Copy")
                                                         .on_hover_text("Copy to clipboard")
                                                         .clicked()
                                                     {
@@ -2257,7 +2257,7 @@ impl SuggestionsTab {
             // Disclaimer
             ui.label(
                 RichText::new(
-                    "⚠️ Disclaimer: These are automated suggestions based on log analysis. \
+                    "⚠ Note: These are automated suggestions based on log analysis. \
                                Always test changes carefully and make small adjustments.",
                 )
                 .small()
@@ -2631,16 +2631,16 @@ impl SuggestionsTab {
     fn draw_status_indicator(&self, ui: &mut egui::Ui, label: &str, status: &Severity) {
         let (icon, color, tooltip) = match status {
             Severity::Critical => (
-                "🔴",
+                "■",
                 egui::Color32::from_rgb(255, 80, 80),
                 "Critical issues found",
             ),
             Severity::Warning => (
-                "🟡",
+                "○",
                 egui::Color32::from_rgb(255, 200, 80),
                 "Needs attention",
             ),
-            Severity::Info => ("🟢", egui::Color32::from_rgb(80, 255, 80), "Looking good"),
+            Severity::Info => ("●", egui::Color32::from_rgb(80, 255, 80), "Looking good"),
         };
 
         let response = ui

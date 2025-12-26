@@ -111,9 +111,9 @@ impl std::fmt::Display for AnalysisPreset {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             AnalysisPreset::Custom => write!(f, "Custom"),
-            AnalysisPreset::MotorTuning => write!(f, "🔧 Motor Tuning"),
-            AnalysisPreset::PropWash => write!(f, "💨 Prop Wash"),
-            AnalysisPreset::FullSpectrum => write!(f, "📊 Full Spectrum"),
+            AnalysisPreset::MotorTuning => write!(f, "Motor Tuning"),
+            AnalysisPreset::PropWash => write!(f, "Prop Wash"),
+            AnalysisPreset::FullSpectrum => write!(f, "Full Spectrum"),
         }
     }
 }
@@ -240,7 +240,7 @@ impl Default for FftSettings {
             plot_colorscheme: Colorscheme::default(),
             // Default max for amplitude scale matching PIDtoolbox climScale default of 0.5
             plot_max: 0.5,
-            auto_scale: false, // Use fixed scale like PIDtoolbox for consistent comparisons
+            auto_scale: true, // Auto-normalize for best contrast by default
             min_freq_hz: 0.0,
             max_freq_hz: 150.0, // Default to ~150Hz like PIDtoolbox sub-100Hz view
             motor_poles: 14,   // Common for 5" quad motors (7 pole pairs)
@@ -427,7 +427,10 @@ struct FftAxis {
     time_texture_receiver: Option<Receiver<(f64, f64, egui::TextureHandle)>>,
     throttle_texture: Option<egui::TextureHandle>,
     throttle_texture_receiver: Option<Receiver<egui::TextureHandle>>,
-    peak_frequency_hz: Option<f32>,
+    /// Detected peaks from aggregated FFT data (top 5 peaks)
+    detected_peaks: Vec<FrequencyPeak>,
+    /// Average spectrum across all FFT chunks for peak detection
+    average_spectrum: Option<Vec<f32>>,
 }
 
 impl FftAxis {
@@ -453,7 +456,8 @@ impl FftAxis {
             time_texture_receiver: None,
             throttle_texture: None,
             throttle_texture_receiver: None,
-            peak_frequency_hz: None,
+            detected_peaks: Vec::new(),
+            average_spectrum: None,
         };
         new.recalculate_ffts();
         new
@@ -877,6 +881,10 @@ impl FftAxis {
 
         if chunks_done {
             self.chunk_receiver = None;
+            
+            // Calculate average spectrum and detect peaks
+            self.calculate_peaks();
+            
             self.redraw_textures();
         }
 
@@ -912,6 +920,52 @@ impl FftAxis {
             }
         }
     }
+    
+    /// Calculate average spectrum and detect peaks from all FFT chunks
+    fn calculate_peaks(&mut self) {
+        if self.chunks.is_empty() {
+            self.detected_peaks.clear();
+            self.average_spectrum = None;
+            return;
+        }
+        
+        let fft_len = self.chunks[0].fft.len();
+        if fft_len < 3 {
+            return;
+        }
+        
+        // Calculate average spectrum across all chunks
+        let mut avg_spectrum = vec![0.0f32; fft_len];
+        for chunk in &self.chunks {
+            for (i, &val) in chunk.fft.iter().enumerate() {
+                if i < avg_spectrum.len() {
+                    avg_spectrum[i] += val;
+                }
+            }
+        }
+        let chunk_count = self.chunks.len() as f32;
+        for val in &mut avg_spectrum {
+            *val /= chunk_count;
+        }
+        
+        // Detect peaks in the average spectrum
+        let sample_rate = self.flight_data.sample_rate() as f32;
+        let min_freq = self.fft_settings.min_freq_hz;
+        let max_freq = self.fft_settings.max_freq_hz.min(sample_rate / 2.0);
+        
+        self.detected_peaks = FftChunk::find_peaks(
+            &avg_spectrum,
+            sample_rate,
+            min_freq.max(10.0), // Avoid very low frequencies
+            max_freq,
+            5, // Top 5 peaks
+        );
+        
+        // Sort peaks by frequency for consistent display
+        self.detected_peaks.sort_by(|a, b| a.frequency_hz.partial_cmp(&b.frequency_hz).unwrap_or(std::cmp::Ordering::Equal));
+        
+        self.average_spectrum = Some(avg_spectrum);
+    }
 
     pub fn set_fft_settings(&mut self, fft_settings: FftSettings) {
         let old_fft_settings = self.fft_settings.clone();
@@ -930,6 +984,11 @@ impl FftAxis {
             || self.time_texture_receiver.is_some()
             || self.throttle_texture_receiver.is_some()
     }
+    
+    /// Get detected peaks for this axis
+    pub fn get_peaks(&self) -> &[FrequencyPeak] {
+        &self.detected_peaks
+    }
 
     pub fn show_time(
         &mut self,
@@ -937,6 +996,7 @@ impl FftAxis {
         max_freq_override: Option<f32>,
         bands: &[FrequencyBand],
         show_rpm: bool,
+        show_peaks: bool,
     ) -> egui::Response {
         self.process_updates();
         let nyquist = self.flight_data.sample_rate() / 2.0;
@@ -951,6 +1011,16 @@ impl FftAxis {
         // Calculate normalized y bounds from frequency settings
         let min_y = (self.fft_settings.min_freq_hz as f64 / max_freq).min(0.99);
         let max_y = (display_max_freq as f64 / max_freq).clamp(min_y + 0.01, 1.0);
+        
+        // Clone peaks for use in closure
+        let peaks_for_display: Vec<_> = if show_peaks {
+            self.detected_peaks.iter()
+                .filter(|p| p.frequency_hz >= self.fft_settings.min_freq_hz && p.frequency_hz <= display_max_freq)
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
 
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
@@ -959,6 +1029,7 @@ impl FftAxis {
             .allow_drag([true, false])
             .allow_zoom([true, false])
             .allow_scroll(false)
+            .auto_bounds(egui::Vec2b::new(true, false))  // Auto-bounds X only, not Y
             .include_y(min_y)
             .include_y(max_y)
             .link_axis("time_vibes", true, true)
@@ -1028,6 +1099,25 @@ impl FftAxis {
                        }
                    }
                 }
+                
+                // Draw detected peak frequency lines
+                for (i, peak) in peaks_for_display.iter().enumerate() {
+                    let y_norm = peak.frequency_hz as f64 / max_freq;
+                    let full_time = self.flight_data.times.last().copied().unwrap_or(100.0);
+                    
+                    // Use cyan color with varying alpha based on prominence
+                    let alpha = ((peak.prominence.min(10.0) / 10.0) * 180.0 + 75.0) as u8;
+                    let color = egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha);
+                    
+                    let points = egui_plot::PlotPoints::new(vec![
+                        [0.0, y_norm], [full_time, y_norm]
+                    ]);
+                    plot_ui.line(egui_plot::Line::new(points)
+                        .color(color)
+                        .width(1.0)
+                        .style(egui_plot::LineStyle::dashed_dense())
+                        .name(format!("Peak {}: {:.0}Hz", i + 1, peak.frequency_hz)));
+                }
             })
             .response
     }
@@ -1038,6 +1128,7 @@ impl FftAxis {
         max_freq_override: Option<f32>,
         bands: &[FrequencyBand],
         show_rpm: bool,
+        show_peaks: bool,
     ) -> egui::Response {
         self.process_updates();
         let nyquist = self.flight_data.sample_rate() / 2.0;
@@ -1052,6 +1143,16 @@ impl FftAxis {
         // Calculate normalized y bounds from frequency settings
         let min_y = (self.fft_settings.min_freq_hz as f64 / max_freq).min(0.99);
         let max_y = (display_max_freq as f64 / max_freq).clamp(min_y + 0.01, 1.0);
+        
+        // Clone peaks for use in closure
+        let peaks_for_display: Vec<_> = if show_peaks {
+            self.detected_peaks.iter()
+                .filter(|p| p.frequency_hz >= self.fft_settings.min_freq_hz && p.frequency_hz <= display_max_freq)
+                .cloned()
+                .collect()
+        } else {
+            vec![]
+        };
 
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
@@ -1060,6 +1161,7 @@ impl FftAxis {
             .allow_drag([true, false])
             .allow_zoom([true, false])
             .allow_scroll(false)
+            .auto_bounds(egui::Vec2b::new(true, false))  // Auto-bounds X only, not Y
             .include_y(min_y)
             .include_y(max_y)
             .link_axis("throttle_vibes", true, true)
@@ -1127,6 +1229,24 @@ impl FftAxis {
                        }
                    }
                 }
+                
+                // Draw detected peak frequency lines
+                for (i, peak) in peaks_for_display.iter().enumerate() {
+                    let y_norm = peak.frequency_hz as f64 / max_freq;
+                    
+                    // Use cyan color with varying alpha based on prominence
+                    let alpha = ((peak.prominence.min(10.0) / 10.0) * 180.0 + 75.0) as u8;
+                    let color = egui::Color32::from_rgba_unmultiplied(0, 255, 255, alpha);
+                    
+                    let points = egui_plot::PlotPoints::new(vec![
+                        [0.0, y_norm], [1.0, y_norm]
+                    ]);
+                    plot_ui.line(egui_plot::Line::new(points)
+                        .color(color)
+                        .width(1.0)
+                        .style(egui_plot::LineStyle::dashed_dense())
+                        .name(format!("Peak {}: {:.0}Hz", i + 1, peak.frequency_hz)));
+                }
             })
 
 
@@ -1140,6 +1260,7 @@ impl FftAxis {
         max_freq_override: Option<f32>,
         bands: &[FrequencyBand],
         show_rpm: bool,
+        show_peaks: bool,
     ) -> egui::Response {
         self.process_updates();
 
@@ -1147,8 +1268,8 @@ impl FftAxis {
             ui.label("")
         } else {
             match domain {
-                VibeDomain::Time => self.show_time(ui, max_freq_override, bands, show_rpm),
-                VibeDomain::Throttle => self.show_throttle(ui, max_freq_override, bands, show_rpm),
+                VibeDomain::Time => self.show_time(ui, max_freq_override, bands, show_rpm, show_peaks),
+                VibeDomain::Throttle => self.show_throttle(ui, max_freq_override, bands, show_rpm, show_peaks),
             }
         }
     }
@@ -1212,6 +1333,7 @@ impl FftVectorSeries {
         _show_labels: bool,
         bands: &[FrequencyBand],
         show_rpm: bool,
+        show_peaks: bool,
     ) -> egui::Response {
         let available_height = ui.available_height();
         // Reserve space for X-axis label at bottom
@@ -1242,7 +1364,7 @@ impl FftVectorSeries {
                             let painter = ui.painter();
 
                             // Draw vertical text (rotated 90 degrees)
-                            let galley = painter.layout_no_wrap(
+                            let _galley = painter.layout_no_wrap(
                                 label_text.to_string(),
                                 egui::FontId::proportional(11.0),
                                 egui::Color32::WHITE,
@@ -1266,8 +1388,8 @@ impl FftVectorSeries {
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
                             match domain {
-                                VibeDomain::Time => axis.show_time(ui, max_freq_override, bands, show_rpm),
-                                VibeDomain::Throttle => axis.show_throttle(ui, max_freq_override, bands, show_rpm),
+                                VibeDomain::Time => axis.show_time(ui, max_freq_override, bands, show_rpm, show_peaks),
+                                VibeDomain::Throttle => axis.show_throttle(ui, max_freq_override, bands, show_rpm, show_peaks),
                             };
                         },
                     );
@@ -1301,6 +1423,15 @@ impl FftVectorSeries {
         })
         .response
     }
+    
+    /// Get detected peaks for all axes
+    pub fn get_all_peaks(&self) -> [&[FrequencyPeak]; 3] {
+        [
+            self.axes[0].get_peaks(),
+            self.axes[1].get_peaks(),
+            self.axes[2].get_peaks(),
+        ]
+    }
 
 }
 
@@ -1319,9 +1450,8 @@ pub struct VibeTab {
     max_freq_hz: f32,
     min_freq_hz: f32,
     current_preset: AnalysisPreset,
-    #[allow(dead_code)]
+    /// Show detected peak frequencies as dashed lines on spectrograms
     show_peak_frequencies: bool,
-    #[allow(dead_code)]
     #[allow(dead_code)]
     show_axis_labels: bool,
     show_rpm_harmonics: bool,
@@ -1603,7 +1733,7 @@ impl VibeTab {
                 .inner_margin(8.0)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new("🔬 Debug Mode:").strong());
+                        ui.label(egui::RichText::new("[DBG] Debug Mode:").strong());
                         ui.label(egui::RichText::new(&mode_name).color(color).strong());
                     });
                     ui.label(egui::RichText::new(&description).weak().small());
@@ -1611,150 +1741,103 @@ impl VibeTab {
             ui.add_space(8.0);
         }
 
-        FlexLayout::new(1200.0, "Settings")
-
-            .add(|ui| {
+        // === TOOLBAR WITH HORIZONTAL SCROLL ===
+        egui::ScrollArea::horizontal()
+            .id_source("vibe_toolbar")
+            .show(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Domain:").on_hover_text("View mode: Time shows spectrograms over flight duration, Throttle shows by throttle position");
-                    ui.selectable_value(&mut self.domain, VibeDomain::Time, "🕙 Time").on_hover_text("Show frequency vs time (X=time, Y=frequency)");
-                    ui.selectable_value(&mut self.domain, VibeDomain::Throttle, "🏃 Throttle").on_hover_text("Show frequency vs throttle (X=throttle%, Y=frequency)");
+                    // Domain & Presets
+                    ui.label("Domain:");
+                    ui.selectable_value(&mut self.domain, VibeDomain::Time, "Time").on_hover_text("Show frequency vs time");
+                    ui.selectable_value(&mut self.domain, VibeDomain::Throttle, "Throttle").on_hover_text("Show frequency vs throttle");
                     ui.separator();
                     ui.label("Presets:");
-                    ui.selectable_value(
-                        &mut self.current_preset,
-                        AnalysisPreset::MotorTuning,
-                        "🔧 Motor",
-                    );
-                    ui.selectable_value(
-                        &mut self.current_preset,
-                        AnalysisPreset::PropWash,
-                        "💨 Prop",
-                    );
-                    ui.selectable_value(
-                        &mut self.current_preset,
-                        AnalysisPreset::FullSpectrum,
-                        "📊 Full",
-                    );
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.current_preset, AnalysisPreset::MotorTuning, "Motor");
+                    ui.selectable_value(&mut self.current_preset, AnalysisPreset::PropWash, "Prop");
+                    ui.selectable_value(&mut self.current_preset, AnalysisPreset::FullSpectrum, "Full");
+                    ui.separator();
+                    
+                    // Series toggles
                     ui.label("Series:");
-                    ui.toggle_value(&mut self.gyro_raw_enabled, "Gyro (raw)");
-                    ui.toggle_value(&mut self.gyro_filtered_enabled, "Gyro (filt)");
-                    ui.toggle_value(&mut self.dterm_raw_enabled, "D (raw)");
-                    ui.toggle_value(&mut self.dterm_filtered_enabled, "D (filt)");
+                    ui.toggle_value(&mut self.gyro_raw_enabled, "Gyro Raw");
+                    ui.toggle_value(&mut self.gyro_filtered_enabled, "Gyro Filt");
+                    ui.toggle_value(&mut self.dterm_raw_enabled, "D Raw");
+                    ui.toggle_value(&mut self.dterm_filtered_enabled, "D Filt");
                     ui.toggle_value(&mut self.setpoint_enabled, "Setpoint");
                     ui.toggle_value(&mut self.pid_error_enabled, "PID Err");
                     ui.toggle_value(&mut self.pid_sum_enabled, "PID Sum");
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("FFT:").on_hover_text("FFT window size: larger = better freq resolution but slower");
+                    ui.separator();
+                    
+                    // FFT settings
+                    ui.label("FFT:");
                     for size in &FFT_SIZE_OPTIONS {
-                        ui.selectable_value(
-                            &mut self.fft_settings.size,
-                            *size,
-                            format!("{}", size),
-                        );
+                        ui.selectable_value(&mut self.fft_settings.size, *size, format!("{}", size));
                     }
                     ui.separator();
-                    ui.label("Step:").on_hover_text("Samples to skip between FFT windows (lower = more detail)");
-                    for value in &[1, 8, 32, 128] {
+                    ui.label("Step:");
+                    for value in &[1usize, 8, 32, 128] {
                         ui.add_enabled_ui(*value <= fft_size, |ui| {
-                            ui.selectable_value(
-                                &mut self.fft_settings.step_size,
-                                *value,
-                                format!("{}", value),
-                            )
+                            ui.selectable_value(&mut self.fft_settings.step_size, *value, format!("{}", value));
                         });
                     }
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Freq:").on_hover_text("Maximum frequency displayed on Y-axis");
+                    ui.separator();
+                    
+                    // Frequency range
+                    ui.label("Freq:");
                     for freq in &[100.0_f32, 250.0, 500.0] {
-                        let label = if *freq == 100.0 {
-                            "<100".to_string()
-                        } else {
-                            format!("{:.0}", freq)
-                        };
+                        let label = if *freq == 100.0 { "<100".to_string() } else { format!("{:.0}", freq) };
                         ui.selectable_value(&mut self.max_freq_hz, *freq, &label);
                     }
-                    ui.selectable_value(
-                        &mut self.max_freq_hz,
-                        nyquist,
-                        format!("Full ({:.0})", nyquist),
-                    );
+                    ui.selectable_value(&mut self.max_freq_hz, nyquist, format!("Full ({:.0})", nyquist));
                     ui.separator();
-                    ui.label("Min Freq:").on_hover_text("Minimum frequency to display (filters out low frequencies)");
-                    ui.add(
-                        egui::DragValue::new(&mut self.min_freq_hz)
-                            .clamp_range(0.0..=self.max_freq_hz - 1.0)
-                            .speed(1.0)
-                            .suffix(" Hz"),
-                    );
+                    ui.label("Min:");
+                    ui.add(egui::DragValue::new(&mut self.min_freq_hz).clamp_range(0.0..=self.max_freq_hz - 1.0).speed(1.0).suffix(" Hz"));
                     ui.separator();
-                    ui.label("Color:").on_hover_text("Color scheme for spectrogram visualization");
+                    
+                    // Color scheme
+                    ui.label("Color:");
                     egui::ComboBox::from_id_source("colorscheme")
                         .selected_text(format!("{:?}", self.fft_settings.plot_colorscheme))
+                        .width(70.0)
                         .show_ui(ui, |ui| {
                             for value in Colorscheme::ALL {
-                                ui.selectable_value(
-                                    &mut self.fft_settings.plot_colorscheme,
-                                    value,
-                                    format!("{:?}", value),
-                                );
+                                ui.selectable_value(&mut self.fft_settings.plot_colorscheme, value, format!("{:?}", value));
                             }
                         });
                     ui.separator();
-                    ui.checkbox(&mut self.fft_settings.auto_scale, "Auto Scale").on_hover_text("Automatically normalize each chart to its own max value");
-                })
-                .response
-            })
-            .add(|ui| {
-                 ui.horizontal(|ui| {
-                    ui.label("Overlays:");
-                    ui.checkbox(&mut self.show_rpm_harmonics, "RPM").on_hover_text("Show 1x, 2x, 3x motor harmonics based on eRPM");
                     
-                    ui.menu_button("Bands", |ui| {
+                    // Scale settings
+                    ui.checkbox(&mut self.fft_settings.auto_scale, "Auto").on_hover_text("Auto normalize color scale");
+                    if !self.fft_settings.auto_scale {
+                        ui.add(egui::DragValue::new(&mut self.fft_settings.plot_max).clamp_range(0.01..=2.0).speed(0.01).fixed_decimals(2)).on_hover_text("Color scale max");
+                    }
+                    ui.separator();
+                    ui.label("Smooth:");
+                    ui.add(egui::DragValue::new(&mut self.fft_settings.smooth_factor).clamp_range(1u8..=5).speed(0.1));
+                    ui.separator();
+                    ui.label("Poles:");
+                    ui.add(egui::DragValue::new(&mut self.fft_settings.motor_poles).clamp_range(2u8..=36).speed(0.5));
+                    ui.separator();
+                    
+                    // Amplitude scale
+                    ui.selectable_value(&mut self.fft_settings.amplitude_scale, AmplitudeScale::Linear, "Lin").on_hover_text("Linear amplitude");
+                    ui.selectable_value(&mut self.fft_settings.amplitude_scale, AmplitudeScale::DeciBel, "dB").on_hover_text("Decibel (PSD)");
+                    ui.separator();
+                    
+                    // Overlays
+                    ui.checkbox(&mut self.show_rpm_harmonics, "RPM").on_hover_text("Show motor harmonics");
+                    ui.checkbox(&mut self.show_peak_frequencies, "Peaks").on_hover_text("Show detected peaks");
+                    ui.menu_button("▼", |ui| {
+                        ui.label("Frequency Bands:");
                         for band in &mut self.frequency_bands {
                             ui.horizontal(|ui| {
                                 ui.checkbox(&mut band.enabled, &band.name);
                                 ui.color_edit_button_srgba(&mut band.color);
                             });
                         }
-                    });
-                    
-                    ui.separator();
-                    ui.label("Smooth:").on_hover_text("Gaussian smoothing factor (1-5). Higher = smoother image, less detail");
-                    ui.add(
-                        egui::DragValue::new(&mut self.fft_settings.smooth_factor)
-                            .clamp_range(1..=5)
-                            .speed(0.1),
-                    );
-                    
-                    ui.separator();
-                    ui.label("Poles:").on_hover_text("Motor pole count (typically 14 for 5\" motors). Used for RPM→Hz conversion");
-                    ui.add(
-                        egui::DragValue::new(&mut self.fft_settings.motor_poles)
-                            .clamp_range(2..=36)
-                            .speed(0.5),
-                    );
-                    
-                    ui.separator();
-                    ui.label("Scale:").on_hover_text("Amplitude scale: Linear (default) or dB (power spectral density)");
-                    ui.selectable_value(&mut self.fft_settings.amplitude_scale, AmplitudeScale::Linear, "Lin");
-                    ui.selectable_value(&mut self.fft_settings.amplitude_scale, AmplitudeScale::DeciBel, "dB");
-                })
-                .response
-            })
-            .show(ui);
+                    }).response.on_hover_text("Frequency bands");
+                });
+            });
 
 
         // Apply preset settings only when preset changes
@@ -1793,9 +1876,59 @@ impl VibeTab {
         }
 
         ui.separator();
+        
+        // === PEAK FREQUENCIES PANEL ===
+        if self.show_peak_frequencies {
+            egui::CollapsingHeader::new("Detected Peak Frequencies")
+                .default_open(true)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        // Collect all series with their peaks
+                        let series_list: Vec<(&str, &FftVectorSeries)> = vec![
+                            ("Gyro Raw", &self.gyro_raw_ffts),
+                            ("Gyro Filt", &self.gyro_filtered_ffts),
+                            ("D Raw", &self.dterm_raw_ffts),
+                            ("D Filt", &self.dterm_filtered_ffts),
+                        ];
+                        
+                        for (name, series) in series_list {
+                            let peaks = series.get_all_peaks();
+                            let has_peaks = peaks.iter().any(|p| !p.is_empty());
+                            
+                            if has_peaks {
+                                egui::Frame::none()
+                                    .fill(egui::Color32::from_black_alpha(40))
+                                    .rounding(4.0)
+                                    .inner_margin(4.0)
+                                    .show(ui, |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(egui::RichText::new(name).strong().size(11.0));
+                                            for (axis_idx, axis_peaks) in peaks.iter().enumerate() {
+                                                if !axis_peaks.is_empty() {
+                                                    let axis_name = AXIS_NAMES[axis_idx];
+                                                    let peak_str: String = axis_peaks.iter()
+                                                        .take(3)
+                                                        .map(|p| format!("{:.0}Hz", p.frequency_hz))
+                                                        .collect::<Vec<_>>()
+                                                        .join(", ");
+                                                    ui.label(
+                                                        egui::RichText::new(format!("{}: {}", axis_name, peak_str))
+                                                            .size(10.0)
+                                                            .color(egui::Color32::from_rgb(0, 255, 255))
+                                                    );
+                                                }
+                                            }
+                                        });
+                                    });
+                            }
+                        }
+                    });
+                });
+            ui.separator();
+        }
 
         // Determine the first enabled column to show axis labels only there
-        let first_enabled = if self.gyro_raw_enabled {
+        let _first_enabled = if self.gyro_raw_enabled {
             0
         } else if self.gyro_filtered_enabled {
             1
@@ -1894,7 +2027,7 @@ impl VibeTab {
                                 });
                                 // Draw colorbar legend
                                 self.fft_settings.draw_colorbar(ui, col_width - 10.0);
-                                fft_series.show(ui, domain, i == 0, &self.frequency_bands, self.show_rpm_harmonics);
+                                fft_series.show(ui, domain, i == 0, &self.frequency_bands, self.show_rpm_harmonics, self.show_peak_frequencies);
                             },
                         );
                     }

@@ -44,7 +44,7 @@ impl LogFile {
             file_progress_sender.send(f).unwrap();
 
             #[cfg(target_arch = "wasm32")]
-            async_std::task::sleep(std::time::Duration::from_secs_f32(0.00001)).await;
+            gloo_timers::future::TimeoutFuture::new(0).await;
         }
 
         Self { file_name, flights }

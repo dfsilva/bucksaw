@@ -84,10 +84,12 @@ impl FlightData {
             if i == 0 {
                 progress_sender.send(parser.stats().progress).unwrap();
                 #[cfg(target_arch = "wasm32")]
-                async_std::task::sleep(std::time::Duration::from_secs_f32(0.00001)).await;
+                gloo_timers::future::TimeoutFuture::new(0).await;
             }
             i = (i + 1) % 1000;
         }
+
+        progress_sender.send(1.0).unwrap();
 
         Ok(Self {
             index,
@@ -123,7 +125,7 @@ impl FlightData {
             .collect::<Option<Vec<_>>>()
             .and_then(|v| v.try_into().ok())
     }
-    
+
     /// Get motor pole count from headers (used for eRPM to Hz conversion)
     /// Returns None if not found in headers, caller should default to 14
     pub fn motor_poles(&self) -> Option<u8> {

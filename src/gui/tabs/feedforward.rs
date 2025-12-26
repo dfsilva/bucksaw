@@ -84,7 +84,7 @@ impl FeedforwardTab {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.heading("🚀 Feedforward Analysis");
+        ui.heading("➤ Feedforward Analysis");
         ui.add_space(10.0);
 
         // Metrics Grid

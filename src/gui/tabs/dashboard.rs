@@ -38,10 +38,10 @@ impl HealthLevel {
 
     fn icon(&self) -> &'static str {
         match self {
-            HealthLevel::Excellent => "✅",
-            HealthLevel::Good => "👍",
-            HealthLevel::Warning => "⚠️",
-            HealthLevel::Poor => "❌",
+            HealthLevel::Excellent => "✓",
+            HealthLevel::Good => "+",
+            HealthLevel::Warning => "⚠",
+            HealthLevel::Poor => "×",
         }
     }
 }
@@ -318,7 +318,7 @@ impl DashboardTab {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Header with overall health
             ui.horizontal(|ui| {
-                ui.heading("📊 Flight Dashboard");
+                ui.heading("▦ Flight Dashboard");
                 ui.add_space(16.0);
                 ui.label(
                     RichText::new(format!(
@@ -346,7 +346,7 @@ impl DashboardTab {
             ui.horizontal(|ui| {
                 self.show_score_card(
                     ui,
-                    "🔊 Noise",
+                    "∼ Noise",
                     self.metrics.noise_score,
                     "Lower is better. Based on gyro and D-term noise levels.",
                     colors.gyro_filtered,
@@ -354,7 +354,7 @@ impl DashboardTab {
                 ui.add_space(12.0);
                 self.show_score_card(
                     ui,
-                    "🎯 Tracking",
+                    "◎ Tracking",
                     self.metrics.tracking_score,
                     "How well gyro follows setpoint. Higher is better.",
                     colors.setpoint,
@@ -362,7 +362,7 @@ impl DashboardTab {
                 ui.add_space(12.0);
                 self.show_score_card(
                     ui,
-                    "⚡ Motors",
+                    "↗ Motors",
                     self.metrics.motor_score,
                     "Motor saturation and balance. Higher is better.",
                     colors.motors[0],
@@ -370,7 +370,7 @@ impl DashboardTab {
                 ui.add_space(12.0);
                 self.show_score_card(
                     ui,
-                    "🔧 Filtering",
+                    "⫶ Filtering",
                     self.metrics.filter_score,
                     "Filter effectiveness score.",
                     colors.d,
@@ -424,7 +424,7 @@ impl DashboardTab {
             // Anomalies summary
             if self.metrics.anomaly_count > 0 {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("🚨 Anomalies Detected:").strong());
+                    ui.label(RichText::new("⚠ Anomalies Detected:").strong());
                     ui.colored_label(
                         Color32::from_rgb(0xfb, 0x49, 0x34),
                         format!("{} events", self.metrics.anomaly_count),
@@ -433,7 +433,7 @@ impl DashboardTab {
                 });
             } else {
                 ui.label(
-                    RichText::new("✅ No anomalies detected")
+                    RichText::new("✓ No anomalies detected")
                         .color(Color32::from_rgb(0x83, 0xa5, 0x98)),
                 );
             }
@@ -443,7 +443,7 @@ impl DashboardTab {
             // Quick navigation hints
             ui.separator();
             ui.add_space(8.0);
-            ui.label(RichText::new("💡 Quick Tips").strong());
+            ui.label(RichText::new("★ Quick Tips").strong());
 
             if self.metrics.noise_score < 70.0 {
                 ui.label("• High noise detected → Check Filter tab for tuning suggestions");

@@ -67,7 +67,7 @@ impl LogsTab {
     }
 
     pub fn show(&mut self, ui: &mut Ui) {
-        ui.heading("📜 Application Logs");
+        ui.heading("≡ Application Logs");
         ui.add_space(8.0);
 
         // Controls bar
@@ -104,7 +104,7 @@ impl LogsTab {
                     ui.add_space(16.0);
 
                     // Search
-                    ui.label("🔍");
+                    ui.label("⌕");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.filter.search_text)
                             .hint_text("Search logs...")
@@ -119,7 +119,7 @@ impl LogsTab {
                     ui.add_space(16.0);
 
                     // Clear button
-                    if ui.button("🗑 Clear").clicked() {
+                    if ui.button("✗ Clear").clicked() {
                         logger().clear();
                         analytics::log_logs_cleared();
                     }

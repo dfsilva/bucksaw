@@ -67,7 +67,7 @@ impl TimeRangeFilter {
                     // Enable checkbox
                     ui.checkbox(&mut self.enabled, "");
 
-                    ui.label(RichText::new("🕐 Time Range:").strong());
+                    ui.label(RichText::new("◔ Time Range:").strong());
 
                     if self.enabled {
                         // Start slider

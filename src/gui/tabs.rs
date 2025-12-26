@@ -54,19 +54,19 @@ pub enum FlightViewTab {
 impl Display for FlightViewTab {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let val = match self {
-            Self::Dashboard => "📊 Dashboard",
-            Self::Plot => "🗠  Plot",
-            Self::Tune => "⛭  Tune",
-            Self::Vibe => "💃 Vibe",
-            Self::Stats => "📈 Stats",
-            Self::Anomalies => "🚨 Anomalies",
-            Self::Error => "⚠  Error",
-            Self::Setup => "📋 Setup",
-            Self::Suggestions => "💡 Suggestions",
-            Self::Filter => "🔧 Filter",
-            Self::Logs => "📜 Logs",
-            Self::Feedforward => "🚀 Feedforward",
-            Self::TuningGuide => "🎓 Guide",
+            Self::Dashboard => "▦ Dashboard",
+            Self::Plot => "∿ Plot",
+            Self::Tune => "⚙ Tune",
+            Self::Vibe => "≈ Vibe",
+            Self::Stats => "Σ Stats",
+            Self::Anomalies => "⚠ Anomalies",
+            Self::Error => "× Error",
+            Self::Setup => "☰ Setup",
+            Self::Suggestions => "★ Suggestions",
+            Self::Filter => "⫶ Filter",
+            Self::Logs => "≡ Logs",
+            Self::Feedforward => "➤ Feedforward",
+            Self::TuningGuide => "▷ Guide",
         };
 
         write!(f, "{val}",)

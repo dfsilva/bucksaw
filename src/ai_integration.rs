@@ -207,10 +207,10 @@ impl AnalysisFocus {
 impl std::fmt::Display for AnalysisFocus {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            AnalysisFocus::General => write!(f, "🎯 General"),
-            AnalysisFocus::ReduceLatency => write!(f, "⚡ Reduce Latency"),
-            AnalysisFocus::ReduceNoise => write!(f, "🔇 Reduce Noise"),
-            AnalysisFocus::MaxPerformance => write!(f, "🏁 Max Performance"),
+            AnalysisFocus::General => write!(f, "○ General"),
+            AnalysisFocus::ReduceLatency => write!(f, "→ Reduce Latency"),
+            AnalysisFocus::ReduceNoise => write!(f, "∼ Reduce Noise"),
+            AnalysisFocus::MaxPerformance => write!(f, "▸ Max Performance"),
         }
     }
 }

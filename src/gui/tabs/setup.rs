@@ -94,7 +94,7 @@ impl SetupTab {
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button("📋 Export CLI")
+                    .button("⎘ Export CLI")
                     .on_hover_text("Copy current tune as Betaflight CLI commands")
                     .clicked()
                 {

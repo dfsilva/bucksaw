@@ -45,6 +45,7 @@ web-sys = { version = "0.3", features = ["Window", "Storage"] }
 async-std = "1.12.0"
 reqwest = { version = "0.11", default-features = false, features = ["json"] }
 getrandom = { version = "0.2", features = ["js"] }
+gloo-timers = { version = "0.3", features = ["futures"] }
 
 [features]
 profiling = ["dep:puffin", "dep:puffin_egui"]

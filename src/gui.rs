@@ -40,6 +40,9 @@ pub struct App {
 impl App {
     pub fn new(cc: &eframe::CreationContext, path: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
+        
+        // Configure fonts with emoji support
+        Self::setup_fonts(&cc.egui_ctx);
 
         let open_file_dialog = Some(OpenFileDialog::new(path));
         Self {
@@ -49,6 +52,74 @@ impl App {
             selected: Selection::default(),
             left_panel_open: true,
         }
+    }
+    
+    /// Configure fonts with emoji/symbol support
+    fn setup_fonts(ctx: &egui::Context) {
+        let mut fonts = egui::FontDefinitions::default();
+        
+        // Try to load system symbol fonts (monochrome, not color emoji)
+        #[cfg(target_os = "macos")]
+        {
+            // macOS: Use Apple Symbols (monochrome, works better with egui)
+            if let Ok(font_data) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
+                fonts.font_data.insert(
+                    "symbols".to_owned(),
+                    egui::FontData::from_owned(font_data).into(),
+                );
+                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                    family.push("symbols".to_owned());
+                }
+            }
+            // Also try SF Symbols or Menlo for better coverage
+            if let Ok(font_data) = std::fs::read("/System/Library/Fonts/Menlo.ttc") {
+                fonts.font_data.insert(
+                    "menlo".to_owned(),
+                    egui::FontData::from_owned(font_data).into(),
+                );
+                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                    family.push("menlo".to_owned());
+                }
+            }
+        }
+        
+        #[cfg(target_os = "windows")]
+        {
+            // Windows: Use Segoe UI Symbol (monochrome)
+            if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
+                fonts.font_data.insert(
+                    "symbols".to_owned(),
+                    egui::FontData::from_owned(font_data).into(),
+                );
+                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                    family.push("symbols".to_owned());
+                }
+            }
+        }
+        
+        #[cfg(target_os = "linux")]
+        {
+            // Linux: Try Noto Sans Symbols or DejaVu
+            let symbol_paths = [
+                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
+                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+                "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            ];
+            for path in symbol_paths {
+                if let Ok(font_data) = std::fs::read(path) {
+                    fonts.font_data.insert(
+                        "symbols".to_owned(),
+                        egui::FontData::from_owned(font_data).into(),
+                    );
+                    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+                        family.push("symbols".to_owned());
+                    }
+                    break;
+                }
+            }
+        }
+        
+        ctx.set_fonts(fonts);
     }
 
     fn open_log(&mut self, ctx: &egui::Context, file_data: LogFile) {
@@ -164,7 +235,7 @@ impl eframe::App for App {
                     // TODO: right panel (ℹ)
 
                     if ui
-                        .button(if narrow { "🗁 " } else { "🗁  Open File" })
+                        .button(if narrow { "□" } else { "□ Open File" })
                         .clicked()
                     {
                         self.open_file_dialog = Some(OpenFileDialog::new(None));
@@ -241,7 +312,7 @@ impl eframe::App for App {
                                     }
 
                                     // File icon and name
-                                    ui.label("📁");
+                                    ui.label("□");
                                     ui.label(&opened_file.file_name);
 
                                     // Close button on the right
@@ -283,7 +354,7 @@ impl eframe::App for App {
                                                 if parse_result.is_ok() {
                                                     ui.label("  ");
                                                 } else {
-                                                    ui.label("⚠ ");
+                                                    ui.label("⚠");
                                                 }
 
                                                 ui.label("Flight ");
@@ -293,7 +364,7 @@ impl eframe::App for App {
                                                     ui.with_layout(
                                                         Layout::right_to_left(egui::Align::Center),
                                                         |ui| {
-                                                            if ui.small_button("➡").clicked() {
+                                                            if ui.small_button("→").clicked() {
                                                                 new_selection = Some(Selection {
                                                                     file_index: file_idx,
                                                                     flight_index: flight_idx,
