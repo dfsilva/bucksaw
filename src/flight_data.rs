@@ -123,6 +123,15 @@ impl FlightData {
             .collect::<Option<Vec<_>>>()
             .and_then(|v| v.try_into().ok())
     }
+    
+    /// Get motor pole count from headers (used for eRPM to Hz conversion)
+    /// Returns None if not found in headers, caller should default to 14
+    pub fn motor_poles(&self) -> Option<u8> {
+        self.unknown_headers
+            .get("motor_poles")
+            .or_else(|| self.unknown_headers.get("motorPoles"))
+            .and_then(|s| s.parse().ok())
+    }
 
     pub fn gyro_unfiltered(&self) -> Option<[&Vec<f32>; 3]> {
         self.get_vector_series("gyroUnfilt")

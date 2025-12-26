@@ -2,12 +2,11 @@ use std::f32::consts::PI;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, OnceLock};
 
-use egui::{Color32, DragValue};
+use egui::Color32;
 use itertools::Itertools;
 
 use crate::flight_data::FlightData;
 use crate::gui::flex::*;
-use crate::gui::loading_modal::LoadingModal;
 use crate::iter::IterExt;
 use crate::utils::execute_in_background;
 
@@ -119,6 +118,15 @@ impl std::fmt::Display for AnalysisPreset {
     }
 }
 
+/// Scale mode for amplitude display
+#[derive(PartialEq, Clone, Copy, Default, Debug)]
+enum AmplitudeScale {
+    #[default]
+    Linear,
+    /// Power Spectral Density in dB (like PIDtoolbox PSD mode)
+    DeciBel,
+}
+
 #[derive(PartialEq, Clone)]
 struct FftSettings {
     pub size: usize,
@@ -128,6 +136,12 @@ struct FftSettings {
     pub auto_scale: bool,
     pub min_freq_hz: f32,
     pub max_freq_hz: f32,
+    /// Motor pole count for eRPM to Hz conversion (default 14 for typical 5" motors)
+    pub motor_poles: u8,
+    /// Amplitude scale mode (linear or dB)
+    pub amplitude_scale: AmplitudeScale,
+    /// Smoothing factor for Gaussian kernel (1-5, higher = more smoothing)
+    pub smooth_factor: u8,
     color_lookup_table: Option<(Colorscheme, [Color32; COLORGRAD_LOOKUP_SIZE])>,
 }
 
@@ -170,6 +184,8 @@ impl FftSettings {
             || self.plot_colorscheme != other.plot_colorscheme
             || self.plot_max != other.plot_max
             || self.auto_scale != other.auto_scale
+            || self.amplitude_scale != other.amplitude_scale
+            || self.smooth_factor != other.smooth_factor
     }
 
     /// Draw a horizontal colorbar legend showing the color scale
@@ -227,9 +243,38 @@ impl Default for FftSettings {
             auto_scale: false, // Use fixed scale like PIDtoolbox for consistent comparisons
             min_freq_hz: 0.0,
             max_freq_hz: 150.0, // Default to ~150Hz like PIDtoolbox sub-100Hz view
+            motor_poles: 14,   // Common for 5" quad motors (7 pole pairs)
+            amplitude_scale: AmplitudeScale::default(),
+            smooth_factor: 2,  // Moderate smoothing by default
             color_lookup_table: None,
         }
     }
+}
+
+impl FftSettings {
+    /// Convert eRPM to mechanical frequency in Hz
+    /// Formula: Hz = eRPM / 60 / (poles / 2)
+    pub fn erpm_to_hz(&self, erpm: f32) -> f32 {
+        erpm / 60.0 / (self.motor_poles as f32 / 2.0)
+    }
+    
+    /// Get Gaussian kernel size based on smooth_factor
+    /// Matches PIDtoolbox's fspecial('gaussian', [smoothFactor*5, smoothFactor], 4)
+    pub fn gaussian_kernel_size(&self) -> (usize, usize) {
+        let factor = self.smooth_factor.max(1) as usize;
+        (factor * 5, factor)
+    }
+}
+
+/// Detected frequency peak with sub-bin accuracy
+#[derive(Clone, Debug)]
+pub struct FrequencyPeak {
+    /// Frequency in Hz (with parabolic interpolation for sub-bin accuracy)
+    pub frequency_hz: f32,
+    /// Peak amplitude (normalized)
+    pub amplitude: f32,
+    /// Quality factor - peak prominence relative to noise floor
+    pub prominence: f32,
 }
 
 #[derive(Clone)]
@@ -263,6 +308,69 @@ impl FftChunk {
             .iter()
             .position(|s| *s == fft_size)
             .unwrap()]
+    }
+    
+    /// Find peaks in FFT spectrum using Betaflight's algorithm with parabolic interpolation
+    /// Returns up to `max_peaks` peaks sorted by amplitude
+    pub fn find_peaks(
+        fft: &[f32],
+        sample_rate: f32,
+        min_freq_hz: f32,
+        max_freq_hz: f32,
+        max_peaks: usize,
+    ) -> Vec<FrequencyPeak> {
+        if fft.len() < 3 {
+            return vec![];
+        }
+        
+        let fft_size = (fft.len() + 1) * 2; // Reconstruct original FFT size
+        let freq_resolution = sample_rate / fft_size as f32;
+        
+        // Calculate noise floor (2x average PSD, like Betaflight)
+        let total_power: f32 = fft.iter().map(|&v| v * v).sum();
+        let noise_floor = (total_power / fft.len() as f32).sqrt() * 2.0;
+        
+        // Find local maxima that exceed noise floor
+        let mut peaks: Vec<(usize, f32)> = Vec::new();
+        
+        let min_bin = ((min_freq_hz / freq_resolution) as usize).max(1);
+        let max_bin = ((max_freq_hz / freq_resolution) as usize).min(fft.len() - 2);
+        
+        for i in min_bin..=max_bin {
+            let val = fft[i];
+            // Check if local maximum and above noise floor
+            if val > fft[i - 1] && val > fft[i + 1] && val > noise_floor {
+                peaks.push((i, val));
+            }
+        }
+        
+        // Sort by amplitude (descending) and take top N
+        peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        peaks.truncate(max_peaks);
+        
+        // Apply parabolic interpolation for sub-bin accuracy (Betaflight's method)
+        peaks.into_iter().map(|(bin, amp)| {
+            let y0 = fft[bin - 1];
+            let y1 = fft[bin];
+            let y2 = fft[bin + 1];
+            
+            // Parabolic interpolation: offset = (y0 - y2) / (2 * (y0 - 2*y1 + y2))
+            let denom = 2.0 * (y0 - 2.0 * y1 + y2);
+            let offset = if denom.abs() > 1e-10 {
+                (y0 - y2) / denom
+            } else {
+                0.0
+            };
+            
+            let precise_bin = bin as f32 + offset.clamp(-0.5, 0.5);
+            let frequency_hz = (precise_bin + 1.0) * freq_resolution; // +1 because we skip DC
+            
+            FrequencyPeak {
+                frequency_hz,
+                amplitude: amp,
+                prominence: amp / noise_floor.max(1e-10),
+            }
+        }).collect()
     }
 
     pub fn calculate(time: f64, data: &[f32], throttle: f32) -> Self {
@@ -351,6 +459,78 @@ impl FftAxis {
         new
     }
 
+    /// Generate a 2D Gaussian kernel matching PIDtoolbox's fspecial('gaussian', [N*5, N], sigma)
+    fn generate_gaussian_kernel(smooth_factor: u8) -> Vec<Vec<f32>> {
+        let factor = smooth_factor.max(1) as usize;
+        let height = factor * 5;  // Frequency axis (more smoothing)
+        let width = factor;       // Time/throttle axis (less smoothing)
+        let sigma = 4.0f32;       // PIDtoolbox default sigma
+        
+        let mut kernel = vec![vec![0.0f32; width]; height];
+        let center_y = (height as f32 - 1.0) / 2.0;
+        let center_x = (width as f32 - 1.0) / 2.0;
+        
+        let mut sum = 0.0f32;
+        for y in 0..height {
+            for x in 0..width {
+                let dy = y as f32 - center_y;
+                let dx = x as f32 - center_x;
+                let val = (-((dx * dx + dy * dy) / (2.0 * sigma * sigma))).exp();
+                kernel[y][x] = val;
+                sum += val;
+            }
+        }
+        
+        // Normalize kernel
+        for row in &mut kernel {
+            for val in row {
+                *val /= sum;
+            }
+        }
+        
+        kernel
+    }
+    
+    /// Apply 2D Gaussian smoothing to FFT data
+    fn apply_gaussian_smoothing(
+        data: &[FftChunk],
+        smooth_factor: u8,
+    ) -> Vec<Vec<f32>> {
+        let width = data.len();
+        let height = data[0].fft.len();
+        let kernel = Self::generate_gaussian_kernel(smooth_factor);
+        let k_height = kernel.len() as i32;
+        let k_width = kernel[0].len() as i32;
+        let k_center_y = k_height / 2;
+        let k_center_x = k_width / 2;
+        
+        let mut smoothed = vec![vec![0.0f32; height]; width];
+        
+        for x in 0..width {
+            for y in 0..height {
+                let mut sum = 0.0f32;
+                let mut weight_sum = 0.0f32;
+                
+                for ky in 0..k_height {
+                    for kx in 0..k_width {
+                        let nx = x as i32 + kx - k_center_x;
+                        let ny = y as i32 + ky - k_center_y;
+                        
+                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                            let w = kernel[ky as usize][kx as usize];
+                            sum += data[nx as usize].fft[ny as usize] * w;
+                            weight_sum += w;
+                        }
+                    }
+                }
+                
+                smoothed[x][y] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
+            }
+        }
+        
+        smoothed
+    }
+
     pub fn create_image(
         data: &[FftChunk],
         max: f32,
@@ -359,53 +539,39 @@ impl FftAxis {
         let fft_len = data[0].fft.len();
         let mut image = egui::ColorImage::new([data.len(), fft_len], Color32::TRANSPARENT);
 
-        // Find the actual max value from data for better normalization
+        let width = data.len();
+        let height = fft_len;
+        
+        // Apply configurable Gaussian smoothing (PIDtoolbox style)
+        let smoothed = Self::apply_gaussian_smoothing(data, fft_settings.smooth_factor);
+
+        // Find the actual max value from smoothed data for normalization
         let actual_max = if fft_settings.auto_scale {
-            data.iter()
-                .flat_map(|chunk| chunk.fft.iter())
+            smoothed.iter()
+                .flat_map(|col| col.iter())
                 .fold(0.0f32, |a, &b| a.max(b))
                 .max(1e-10)
         } else {
             max.max(1e-10)
         };
 
-        // Apply a simple 3x3 smoothing filter like PIDtoolbox's Gaussian filter
-        // First, collect all values into a 2D array for smoothing
-        let width = data.len();
-        let height = fft_len;
-        let mut smoothed = vec![vec![0.0f32; height]; width];
-
-        // Gaussian-like 3x3 kernel (approximation)
-        let kernel = [[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]];
-
-        for x in 0..width {
-            for y in 0..height {
-                let mut sum = 0.0f32;
-                let mut weight_sum = 0.0f32;
-
-                for dx in 0..3i32 {
-                    for dy in 0..3i32 {
-                        let nx = x as i32 + dx - 1;
-                        let ny = y as i32 + dy - 1;
-
-                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
-                            let w = kernel[dy as usize][dx as usize];
-                            sum += data[nx as usize].fft[ny as usize] * w;
-                            weight_sum += w;
-                        }
-                    }
-                }
-
-                smoothed[x][y] = sum / weight_sum.max(1.0);
-            }
-        }
-
         // Fill image with colors, flipping Y axis so low frequencies are at bottom
         for x in 0..width {
             for y in 0..height {
                 let val = smoothed[x][y];
-                let normalized = (val / actual_max).clamp(0.0, 1.0);
-                // PIDtoolbox doesn't apply gamma correction, uses linear mapping
+                
+                // Apply amplitude scale mode
+                let normalized = match fft_settings.amplitude_scale {
+                    AmplitudeScale::Linear => (val / actual_max).clamp(0.0, 1.0),
+                    AmplitudeScale::DeciBel => {
+                        // PSD dB mode: range from -40dB to +10dB (like PIDtoolbox)
+                        let db = 20.0 * (val.max(1e-10)).log10();
+                        let min_db = -40.0f32;
+                        let max_db = 10.0f32;
+                        ((db - min_db) / (max_db - min_db)).clamp(0.0, 1.0)
+                    }
+                };
+                
                 // Flip Y: image y=0 is top, so put high freq at top, low freq at bottom
                 let flipped_y = height - 1 - y;
                 image[(x, flipped_y)] = fft_settings.color_at(normalized);
@@ -588,9 +754,37 @@ impl FftAxis {
                 .map(|v| v.len())
                 .unwrap_or(fft_output_size);
 
-            // Apply a simple 3x3 smoothing filter like PIDtoolbox's Gaussian filter
-            let kernel = [[1.0f32, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]];
-
+            // Apply configurable Gaussian smoothing (PIDtoolbox style)
+            let smooth_factor = fft_settings.smooth_factor.max(1) as usize;
+            let k_height = smooth_factor * 5;  // Frequency axis (more smoothing)
+            let k_width = smooth_factor;       // Throttle axis (less smoothing)
+            let sigma = 4.0f32;
+            
+            // Generate Gaussian kernel
+            let mut kernel = vec![vec![0.0f32; k_width]; k_height];
+            let center_y = (k_height as f32 - 1.0) / 2.0;
+            let center_x = (k_width as f32 - 1.0) / 2.0;
+            let mut kernel_sum = 0.0f32;
+            
+            for ky in 0..k_height {
+                for kx in 0..k_width {
+                    let dy = ky as f32 - center_y;
+                    let dx = kx as f32 - center_x;
+                    let val = (-((dx * dx + dy * dy) / (2.0 * sigma * sigma))).exp();
+                    kernel[ky][kx] = val;
+                    kernel_sum += val;
+                }
+            }
+            
+            // Normalize kernel
+            for row in &mut kernel {
+                for val in row {
+                    *val /= kernel_sum;
+                }
+            }
+            
+            let k_center_y = k_height as i32 / 2;
+            let k_center_x = k_width as i32 / 2;
             let mut smoothed = vec![vec![0.0f32; height]; width];
 
             for x in 0..width {
@@ -598,20 +792,20 @@ impl FftAxis {
                     let mut sum = 0.0f32;
                     let mut weight_sum = 0.0f32;
 
-                    for dx in 0..3i32 {
-                        for dy in 0..3i32 {
-                            let nx = x as i32 + dx - 1;
-                            let ny = y as i32 + dy - 1;
+                    for ky in 0..k_height as i32 {
+                        for kx in 0..k_width as i32 {
+                            let nx = x as i32 + kx - k_center_x;
+                            let ny = y as i32 + ky - k_center_y;
 
                             if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
-                                let w = kernel[dy as usize][dx as usize];
+                                let w = kernel[ky as usize][kx as usize];
                                 sum += throttle_averages[nx as usize][ny as usize] * w;
                                 weight_sum += w;
                             }
                         }
                     }
 
-                    smoothed[x][y] = sum / weight_sum.max(1.0);
+                    smoothed[x][y] = if weight_sum > 0.0 { sum / weight_sum } else { 0.0 };
                 }
             }
 
@@ -633,8 +827,19 @@ impl FftAxis {
             for x in 0..width {
                 for y in 0..height {
                     let val = smoothed[x][y];
-                    let normalized = (val / actual_max).clamp(0.0, 1.0);
-                    // PIDtoolbox doesn't apply gamma correction, uses linear mapping
+                    
+                    // Apply amplitude scale mode
+                    let normalized = match fft_settings.amplitude_scale {
+                        AmplitudeScale::Linear => (val / actual_max).clamp(0.0, 1.0),
+                        AmplitudeScale::DeciBel => {
+                            // PSD dB mode: range from -40dB to +10dB (like PIDtoolbox)
+                            let db = 20.0 * (val.max(1e-10)).log10();
+                            let min_db = -40.0f32;
+                            let max_db = 10.0f32;
+                            ((db - min_db) / (max_db - min_db)).clamp(0.0, 1.0)
+                        }
+                    };
+                    
                     let flipped_y = height - 1 - y;
                     image[(x, flipped_y)] = fft_settings.color_at(normalized);
                 }
@@ -809,7 +1014,9 @@ impl FftAxis {
                                          }
                                      }
                                      let avg_erpm = if count > 0 { sum_erpm / count as f32 } else { 0.0 };
-                                     let mech_hz = avg_erpm / 420.0; // 14 poles assumed
+                                     // Use configurable motor poles: Hz = eRPM / 60 / (poles/2)
+                                     let motor_poles = self.fft_settings.motor_poles as f32;
+                                     let mech_hz = avg_erpm / 60.0 / (motor_poles / 2.0);
                                      [times[i], (mech_hz * harmonic as f32 / max_freq as f32) as f64]
                                 }).collect();
                                 
@@ -902,7 +1109,9 @@ impl FftAxis {
                        }
                        
                        if max_erpm > 0.0 {
-                            let max_mech_hz = max_erpm / 420.0; // 14 poles
+                            // Use configurable motor poles: Hz = eRPM / 60 / (poles/2)
+                            let motor_poles = self.fft_settings.motor_poles as f32;
+                            let max_mech_hz = max_erpm / 60.0 / (motor_poles / 2.0);
                             for harmonic in 1..=3 {
                                 // Linear approximation: Hz = MaxHz * Throttle
                                 let points = egui_plot::PlotPoints::new(vec![
@@ -1144,7 +1353,12 @@ static D_TERM_CALC_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
 
 impl VibeTab {
     pub fn new(ctx: &egui::Context, fd: Arc<FlightData>) -> Self {
-        let fft_settings = FftSettings::default();
+        let mut fft_settings = FftSettings::default();
+        
+        // Try to read motor pole count from log headers (default to 14)
+        if let Some(poles) = fd.motor_poles() {
+            fft_settings.motor_poles = poles;
+        }
 
         // Pre-compute and cache PID error and PID sum data
         let pid_error_data = if let (Some(sp), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
@@ -1516,6 +1730,27 @@ impl VibeTab {
                             });
                         }
                     });
+                    
+                    ui.separator();
+                    ui.label("Smooth:").on_hover_text("Gaussian smoothing factor (1-5). Higher = smoother image, less detail");
+                    ui.add(
+                        egui::DragValue::new(&mut self.fft_settings.smooth_factor)
+                            .clamp_range(1..=5)
+                            .speed(0.1),
+                    );
+                    
+                    ui.separator();
+                    ui.label("Poles:").on_hover_text("Motor pole count (typically 14 for 5\" motors). Used for RPM→Hz conversion");
+                    ui.add(
+                        egui::DragValue::new(&mut self.fft_settings.motor_poles)
+                            .clamp_range(2..=36)
+                            .speed(0.5),
+                    );
+                    
+                    ui.separator();
+                    ui.label("Scale:").on_hover_text("Amplitude scale: Linear (default) or dB (power spectral density)");
+                    ui.selectable_value(&mut self.fft_settings.amplitude_scale, AmplitudeScale::Linear, "Lin");
+                    ui.selectable_value(&mut self.fft_settings.amplitude_scale, AmplitudeScale::DeciBel, "dB");
                 })
                 .response
             })
