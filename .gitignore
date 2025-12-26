@@ -3,6 +3,7 @@
 .idea
 blackbox-log-viewer
 PIDtoolbox
+betaflight
 
 # Environment files with secrets
 .env
