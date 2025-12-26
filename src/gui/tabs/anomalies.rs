@@ -2,6 +2,7 @@ use egui::{Color32, RichText};
 use egui_plot::{Plot, PlotPoints, Polygon};
 use std::sync::Arc;
 
+use crate::analytics;
 use crate::flight_data::FlightData;
 
 /// Action to navigate to a different tab with optional time range focus
@@ -481,6 +482,7 @@ impl AnomaliesTab {
                                 ))
                                 .clicked()
                             {
+                                analytics::log_anomaly_jump(event.anomaly_type.label());
                                 navigation_request = Some(NavigationAction::with_context(
                                     event.start_time,
                                     event.end_time,

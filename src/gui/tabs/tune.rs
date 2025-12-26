@@ -4,6 +4,7 @@ use std::sync::Arc;
 use egui_oszi::{TimeseriesGroup, TimeseriesLine, TimeseriesPlot, TimeseriesPlotMemory};
 use egui_plot::{Corner, Legend, PlotPoints};
 
+use crate::analytics;
 use crate::flight_data::FlightData;
 use crate::gui::colors::Colors;
 use crate::gui::flex::FlexColumns;
@@ -237,6 +238,7 @@ impl TuneTab {
                 });
             if self.smoothing != prev_smoothing {
                 should_recalculate = true;
+                analytics::log_step_response_settings(&self.smoothing.to_string(), self.min_input_threshold);
             }
 
             ui.separator();

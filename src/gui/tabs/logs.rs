@@ -1,5 +1,6 @@
 use egui::{Color32, RichText, Ui};
 
+use crate::analytics;
 use crate::app_logger::{logger, LogCategory, LogEntry, LogLevel};
 
 /// Filter state for the logs tab
@@ -120,6 +121,7 @@ impl LogsTab {
                     // Clear button
                     if ui.button("🗑 Clear").clicked() {
                         logger().clear();
+                        analytics::log_logs_cleared();
                     }
                 });
             });

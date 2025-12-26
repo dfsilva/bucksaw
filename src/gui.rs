@@ -2,6 +2,7 @@ pub mod blackbox_ui_ext;
 pub mod colors;
 pub mod flex;
 pub mod flight_view;
+pub mod loading_modal;
 pub mod open_file;
 pub mod opened_file;
 pub mod tabs;
@@ -12,6 +13,7 @@ use std::sync::Arc;
 use egui::Layout;
 use itertools::Itertools;
 
+use crate::analytics;
 use crate::gui::blackbox_ui_ext::*;
 use crate::gui::colors::Colors;
 use crate::gui::flight_view::*;
@@ -65,6 +67,9 @@ impl App {
         let file_name = file_data.file_name;
         let flight_count = flights.len();
 
+        // Track file opened in analytics
+        analytics::log_file_opened(&file_name, flight_count);
+
         let opened_file = OpenedFile::new(file_name, flights);
         self.opened_files.push(opened_file);
 
@@ -85,6 +90,7 @@ impl App {
     fn close_file(&mut self, file_index: usize) {
         if file_index < self.opened_files.len() {
             self.opened_files.remove(file_index);
+            analytics::log_file_closed();
 
             // Adjust selection if needed
             if self.opened_files.is_empty() {
@@ -152,6 +158,7 @@ impl eframe::App for App {
                         .clicked()
                     {
                         self.left_panel_open = !self.left_panel_open;
+                        analytics::log_panel_toggled("left", self.left_panel_open);
                     }
 
                     // TODO: right panel (ℹ)
@@ -185,7 +192,12 @@ impl eframe::App for App {
                         } else {
                             tab.to_string()
                         };
+                        let previous_tab = self.flight_view_tab;
                         ui.selectable_value(&mut self.flight_view_tab, tab, label);
+                        // Track tab selection in analytics
+                        if previous_tab != self.flight_view_tab && self.flight_view_tab == tab {
+                            analytics::log_tab_selected(&tab.analytics_name());
+                        }
                     }
 
                     ui.separator();
@@ -286,6 +298,9 @@ impl eframe::App for App {
                                                                     file_index: file_idx,
                                                                     flight_index: flight_idx,
                                                                 });
+                                                                analytics::log_flight_selected(
+                                                                    flight_idx, file_idx,
+                                                                );
                                                             }
                                                         },
                                                     );

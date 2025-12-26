@@ -3,3 +3,7 @@
 .idea
 blackbox-log-viewer
 PIDtoolbox
+
+# Environment files with secrets
+.env
+.env.local

@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use egui::{Color32, RichText, Ui};
 
+use crate::analytics;
 use crate::ai_integration::{
     AIAnalysisResult, AIModel, AnalysisFocus, FlightMetrics, ModelFetchResult, OpenRouterClient,
     DEFAULT_MODELS,
@@ -1082,8 +1083,14 @@ impl SuggestionsTab {
                     AIAnalysisResult::Success(response) => {
                         self.ai_response = Some(response);
                         self.ai_error = None;
+                        // Track successful AI analysis
+                        if let Some(ref model_id) = self.selected_model_id {
+                            analytics::log_ai_analysis_completed(model_id);
+                        }
                     }
                     AIAnalysisResult::Error(err) => {
+                        // Track failed AI analysis
+                        analytics::log_ai_analysis_failed(&err);
                         self.ai_error = Some(err);
                         self.ai_response = None;
                     }
@@ -1210,6 +1217,7 @@ impl SuggestionsTab {
                                 },
                             };
                             settings.save();
+                            analytics::log_ai_settings_saved();
                             log::info!("AI settings saved");
                         }
                     });
@@ -1248,6 +1256,9 @@ impl SuggestionsTab {
                             let metrics = self.build_flight_metrics();
                             let model_id = self.selected_model_id.clone().unwrap_or_default();
                             let api_key = self.api_key.clone();
+
+                            // Track AI analysis started
+                            analytics::log_ai_analysis_started(&model_id, &format!("{}", self.analysis_focus));
 
                             // Start async analysis
                             self.ai_loading = true;
@@ -1335,6 +1346,7 @@ impl SuggestionsTab {
                         ui.horizontal(|ui| {
                             if ui.button("📋 Copy Response").clicked() {
                                 ui.output_mut(|o| o.copied_text = response.clone());
+                                analytics::log_ai_response_copied();
                             }
                             if ui.button("🗑 Clear").clicked() {
                                 clear_ai_response = true;
@@ -1365,6 +1377,8 @@ impl SuggestionsTab {
                 {
                     let all_commands = self.generate_cli_export();
                     if !all_commands.is_empty() {
+                        let cmd_count = self.suggestions.iter().filter(|s| s.cli_command.is_some()).count();
+                        analytics::log_cli_commands_copied(cmd_count, None);
                         ui.output_mut(|o| o.copied_text = all_commands);
                     }
                 }
@@ -1382,6 +1396,7 @@ impl SuggestionsTab {
                         .clicked()
                     {
                         let commands = self.generate_cli_export_filtered(Some(Severity::Critical));
+                        analytics::log_cli_commands_copied(critical_count, Some("critical"));
                         ui.output_mut(|o| o.copied_text = commands);
                     }
                 }

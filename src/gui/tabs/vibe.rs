@@ -7,6 +7,7 @@ use itertools::Itertools;
 
 use crate::flight_data::FlightData;
 use crate::gui::flex::*;
+use crate::gui::loading_modal::LoadingModal;
 use crate::iter::IterExt;
 use crate::utils::execute_in_background;
 
@@ -14,7 +15,8 @@ use super::PLOT_HEIGHT;
 
 const COLORGRAD_LOOKUP_SIZE: usize = 128;
 const TIME_DOMAIN_TEX_WIDTH: usize = 1024;
-const THROTTLE_DOMAIN_BUCKETS: usize = 256;
+// PIDtoolbox uses 100 throttle buckets (0-100% throttle percentage)
+const THROTTLE_DOMAIN_BUCKETS: usize = 100;
 const FFT_SIZE_OPTIONS: [usize; 4] = [256, 512, 1024, 2048];
 
 #[derive(PartialEq, Clone, Copy)]
@@ -124,6 +126,8 @@ struct FftSettings {
     pub plot_colorscheme: Colorscheme,
     pub plot_max: f32,
     pub auto_scale: bool,
+    pub min_freq_hz: f32,
+    pub max_freq_hz: f32,
     color_lookup_table: Option<(Colorscheme, [Color32; COLORGRAD_LOOKUP_SIZE])>,
 }
 
@@ -167,6 +171,49 @@ impl FftSettings {
             || self.plot_max != other.plot_max
             || self.auto_scale != other.auto_scale
     }
+
+    /// Draw a horizontal colorbar legend showing the color scale
+    pub fn draw_colorbar(&mut self, ui: &mut egui::Ui, width: f32) {
+        let height = 15.0;
+        let (rect, _response) =
+            ui.allocate_exact_size(egui::vec2(width, height + 15.0), egui::Sense::hover());
+
+        // Draw the gradient bar
+        let bar_rect =
+            egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 0.0), egui::vec2(width, height));
+
+        let painter = ui.painter_at(rect);
+
+        // Draw gradient using multiple vertical strips
+        let num_strips = 64;
+        let strip_width = width / num_strips as f32;
+        for i in 0..num_strips {
+            let t = i as f32 / (num_strips - 1) as f32;
+            let color = self.color_at(t);
+            let strip_rect = egui::Rect::from_min_size(
+                bar_rect.min + egui::vec2(i as f32 * strip_width, 0.0),
+                egui::vec2(strip_width + 0.5, height),
+            );
+            painter.rect_filled(strip_rect, 0.0, color);
+        }
+
+        // Draw border
+        painter.rect_stroke(bar_rect, 0.0, egui::Stroke::new(1.0, egui::Color32::GRAY));
+
+        // Draw scale labels
+        let label_y = rect.min.y + height + 2.0;
+        let labels = ["0", "0.25", "0.5", "0.75", "1.0"];
+        for (i, label) in labels.iter().enumerate() {
+            let x = rect.min.x + (i as f32 / 4.0) * width;
+            painter.text(
+                egui::pos2(x, label_y),
+                egui::Align2::CENTER_TOP,
+                *label,
+                egui::FontId::proportional(9.0),
+                egui::Color32::LIGHT_GRAY,
+            );
+        }
+    }
 }
 
 impl Default for FftSettings {
@@ -175,8 +222,11 @@ impl Default for FftSettings {
             size: 256,
             step_size: 8,
             plot_colorscheme: Colorscheme::default(),
-            plot_max: 10.0,
-            auto_scale: false,
+            // Default max for amplitude scale matching PIDtoolbox climScale default of 0.5
+            plot_max: 0.5,
+            auto_scale: false, // Use fixed scale like PIDtoolbox for consistent comparisons
+            min_freq_hz: 0.0,
+            max_freq_hz: 150.0, // Default to ~150Hz like PIDtoolbox sub-100Hz view
             color_lookup_table: None,
         }
     }
@@ -191,7 +241,8 @@ struct FftChunk {
 
 impl FftChunk {
     pub fn hamming_window(fft_size: usize) -> &'static [f32] {
-        // TODO
+        // Standard Hamming window: w(n) = 0.54 - 0.46 * cos(2π * n / (N-1))
+        // Matches MATLAB's hamming() function used by PIDtoolbox
         static LOOKUP: OnceLock<[Vec<f32>; FFT_SIZE_OPTIONS.len()]> = OnceLock::new();
         let lookup = LOOKUP.get_or_init(|| {
             FFT_SIZE_OPTIONS
@@ -199,7 +250,7 @@ impl FftChunk {
                 .map(|fft_size| {
                     (0..fft_size)
                         .map(|i| {
-                            0.53836 * (1.0 - (2.0 * PI * (i as f32) / (fft_size as f32)).cos())
+                            0.54 - 0.46 * (2.0 * PI * (i as f32) / ((fft_size - 1) as f32)).cos()
                         })
                         .collect()
                 })
@@ -215,7 +266,7 @@ impl FftChunk {
     }
 
     pub fn calculate(time: f64, data: &[f32], throttle: f32) -> Self {
-        // convert to complex and apply hamming window
+        // Convert to complex and apply hamming window
         let window = Self::hamming_window(data.len());
         let mut input: Vec<_> = data.iter().zip(window.iter()).map(|(d, w)| d * w).collect();
 
@@ -223,10 +274,22 @@ impl FftChunk {
         let mut output = planner.make_output_vec();
         planner.process(&mut input, &mut output).unwrap();
 
+        // Calculate window sum for amplitude normalization (like PIDtoolbox amplitude mode)
+        // PIDtoolbox uses abs(fft(signal .* window)) / sum(window) for amplitude
+        let window_sum: f32 = window.iter().sum();
+
+        // Compute amplitude spectrum (not dB!) matching PIDtoolbox default mode
+        // PIDtoolbox normalizes by N/2 and applies window correction
+        // Low frequencies at bottom (no rev), will flip during display
         let fft = output
             .into_iter()
-            .rev()
-            .map(|c| (c.re.powi(2) + c.im.powi(2)).log10())
+            .skip(1) // Skip DC component
+            .map(|c| {
+                // Amplitude = magnitude normalized by window sum and FFT length
+                // Multiply by 2 for one-sided spectrum (except DC and Nyquist)
+                let amplitude = (c.re.powi(2) + c.im.powi(2)).sqrt() * 2.0 / window_sum;
+                amplitude
+            })
             .collect();
 
         Self {
@@ -293,24 +356,63 @@ impl FftAxis {
         max: f32,
         fft_settings: &mut FftSettings,
     ) -> egui::ColorImage {
-        let mut image =
-            egui::ColorImage::new([data.len(), data[0].fft.len()], Color32::TRANSPARENT);
+        let fft_len = data[0].fft.len();
+        let mut image = egui::ColorImage::new([data.len(), fft_len], Color32::TRANSPARENT);
 
-        // Use logarithmic scaling (dB) like PIDToolbox for better visual contrast
-        // Convert to dB scale: 20 * log10(val / ref)
-        // We normalize to 0-1 range for colormap
-        let log_max = (max + 1e-10).log10();
-        let log_min = -3.0; // Approximately -60 dB floor
-        let log_range = log_max - log_min;
+        // Find the actual max value from data for better normalization
+        let actual_max = if fft_settings.auto_scale {
+            data.iter()
+                .flat_map(|chunk| chunk.fft.iter())
+                .fold(0.0f32, |a, &b| a.max(b))
+                .max(1e-10)
+        } else {
+            max.max(1e-10)
+        };
 
-        for x in 0..data.len() {
-            for y in 0..data[x].fft.len() {
-                let val = data[x].fft[y];
-                // Apply log scaling with floor
-                let log_val = (val.max(1e-10)).log10();
-                // Normalize to 0-1 range
-                let normalized = ((log_val - log_min) / log_range).clamp(0.0, 1.0);
-                image[(x, y)] = fft_settings.color_at(normalized);
+        // Apply a simple 3x3 smoothing filter like PIDtoolbox's Gaussian filter
+        // First, collect all values into a 2D array for smoothing
+        let width = data.len();
+        let height = fft_len;
+        let mut smoothed = vec![vec![0.0f32; height]; width];
+
+        // Gaussian-like 3x3 kernel (approximation)
+        let kernel = [
+            [1.0, 2.0, 1.0],
+            [2.0, 4.0, 2.0],
+            [1.0, 2.0, 1.0],
+        ];
+
+        for x in 0..width {
+            for y in 0..height {
+                let mut sum = 0.0f32;
+                let mut weight_sum = 0.0f32;
+
+                for dx in 0..3i32 {
+                    for dy in 0..3i32 {
+                        let nx = x as i32 + dx - 1;
+                        let ny = y as i32 + dy - 1;
+
+                        if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                            let w = kernel[dy as usize][dx as usize];
+                            sum += data[nx as usize].fft[ny as usize] * w;
+                            weight_sum += w;
+                        }
+                    }
+                }
+
+                smoothed[x][y] = sum / weight_sum.max(1.0);
+            }
+        }
+
+        // Fill image with colors, flipping Y axis so low frequencies are at bottom
+        for x in 0..width {
+            for y in 0..height {
+                let val = smoothed[x][y];
+                let normalized = (val / actual_max).clamp(0.0, 1.0);
+                // PIDtoolbox doesn't apply gamma correction, uses linear mapping
+                // Flip Y: image y=0 is top, so put high freq at top, low freq at bottom
+                let flipped_y = height - 1 - y;
+                image[(x, flipped_y)] = fft_settings.color_at(normalized);
             }
         }
 
@@ -357,8 +459,10 @@ impl FftAxis {
                 .chunks(100)
                 .into_iter()
                 .for_each(|chunks| {
-                    chunk_sender.send(chunks.collect()).unwrap();
-                    ctx.request_repaint();
+                    // Ignore send errors - happens when receiver is dropped (e.g., flight change)
+                    if chunk_sender.send(chunks.collect()).is_ok() {
+                        ctx.request_repaint();
+                    }
                 });
         });
     }
@@ -383,8 +487,10 @@ impl FftAxis {
                     ctx.load_texture(format!("tex_{:?}", i), image, Default::default());
                 let start = columns.first().unwrap().time;
                 let end = columns.last().unwrap().time;
-                time_texture_sender.send((start, end, tex_handle)).unwrap();
-                ctx.request_repaint();
+                // Ignore send errors - happens when receiver is dropped (e.g., flight change)
+                if time_texture_sender.send((start, end, tex_handle)).is_ok() {
+                    ctx.request_repaint();
+                }
             }
         });
 
@@ -404,6 +510,8 @@ impl FftAxis {
             }
 
             let mut throttle_averages: Vec<Option<Vec<f32>>> = Vec::new();
+            let fft_output_size = fft_size / 2; // realfft output is N/2+1, we skip DC so N/2
+            
             for bucket in throttle_buckets.into_iter() {
                 let size = bucket.len();
                 if size == 0 {
@@ -411,10 +519,13 @@ impl FftAxis {
                     continue;
                 }
 
+                // Get actual FFT size from first chunk in bucket
+                let first_fft_len = bucket.first().map(|c| c.fft.len()).unwrap_or(fft_output_size);
+                
                 let avg = bucket
                     .into_iter()
                     .map(|chunk| chunk.fft)
-                    .fold(vec![0f32; fft_size / 2], |a, b| {
+                    .fold(vec![0f32; first_fft_len], |a, b| {
                         a.into_iter()
                             .zip(b.into_iter())
                             .map(|(a, b)| {
@@ -462,7 +573,7 @@ impl FftAxis {
                     }
                     (Some(l), None) => throttle_averages[l].clone(),
                     (None, Some(r)) => throttle_averages[r].clone(),
-                    (None, None) => Some(vec![0.0; fft_size / 2]),
+                    (None, None) => Some(vec![0.0; fft_output_size]),
                 };
 
                 throttle_averages[i] = interpolated;
@@ -471,21 +582,74 @@ impl FftAxis {
             let throttle_averages: Vec<Vec<f32>> =
                 throttle_averages.into_iter().map(|o| o.unwrap()).collect();
 
+            let width = THROTTLE_DOMAIN_BUCKETS;
+            // Use actual height from the data
+            let height = throttle_averages.first().map(|v| v.len()).unwrap_or(fft_output_size);
+            
+            // Apply a simple 3x3 smoothing filter like PIDtoolbox's Gaussian filter
+            let kernel = [
+                [1.0f32, 2.0, 1.0],
+                [2.0, 4.0, 2.0],
+                [1.0, 2.0, 1.0],
+            ];
+            
+            let mut smoothed = vec![vec![0.0f32; height]; width];
+            
+            for x in 0..width {
+                for y in 0..height {
+                    let mut sum = 0.0f32;
+                    let mut weight_sum = 0.0f32;
+
+                    for dx in 0..3i32 {
+                        for dy in 0..3i32 {
+                            let nx = x as i32 + dx - 1;
+                            let ny = y as i32 + dy - 1;
+
+                            if nx >= 0 && nx < width as i32 && ny >= 0 && ny < height as i32 {
+                                let w = kernel[dy as usize][dx as usize];
+                                sum += throttle_averages[nx as usize][ny as usize] * w;
+                                weight_sum += w;
+                            }
+                        }
+                    }
+
+                    smoothed[x][y] = sum / weight_sum.max(1.0);
+                }
+            }
+
             let mut image = egui::ColorImage::new(
-                [THROTTLE_DOMAIN_BUCKETS, fft_size / 2],
+                [width, height],
                 Color32::TRANSPARENT,
             );
 
-            for x in 0..THROTTLE_DOMAIN_BUCKETS {
-                for y in 0..fft_size / 2 {
-                    let val = throttle_averages[x][y];
-                    image[(x, y)] = fft_settings.color_at(f32::max(0.0, val) / fft_max);
+            // Find actual max value from the smoothed data for normalization
+            // Use fixed scale if auto_scale is disabled
+            let actual_max = if fft_settings.auto_scale {
+                smoothed
+                    .iter()
+                    .flat_map(|v| v.iter())
+                    .fold(0.0f32, |a, &b| a.max(b))
+                    .max(1e-10)
+            } else {
+                fft_max.max(1e-10)
+            };
+
+            // Fill image with colors, flipping Y axis so low frequencies are at bottom
+            for x in 0..width {
+                for y in 0..height {
+                    let val = smoothed[x][y];
+                    let normalized = (val / actual_max).clamp(0.0, 1.0);
+                    // PIDtoolbox doesn't apply gamma correction, uses linear mapping
+                    let flipped_y = height - 1 - y;
+                    image[(x, flipped_y)] = fft_settings.color_at(normalized);
                 }
             }
 
             let tex_handle = ctx.load_texture("throttle_fft", image, Default::default());
-            throttle_texture_sender.send(tex_handle).unwrap();
-            ctx.request_repaint();
+            // Ignore send errors - happens when receiver is dropped (e.g., flight change)
+            if throttle_texture_sender.send(tex_handle).is_ok() {
+                ctx.request_repaint();
+            }
         });
 
         self.time_texture_receiver = Some(time_texture_receiver);
@@ -516,15 +680,35 @@ impl FftAxis {
             self.redraw_textures();
         }
 
+        // Process time textures and clear receiver when done
         if let Some(receiver) = &self.time_texture_receiver {
-            while let Ok((t_start, t_end, tex)) = receiver.try_recv() {
-                self.time_textures.push((t_start, t_end, tex));
+            loop {
+                match receiver.try_recv() {
+                    Ok((t_start, t_end, tex)) => {
+                        self.time_textures.push((t_start, t_end, tex));
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.time_texture_receiver = None;
+                        break;
+                    }
+                }
             }
         }
 
+        // Process throttle texture and clear receiver when done
         if let Some(receiver) = &self.throttle_texture_receiver {
-            while let Ok(texture) = receiver.try_recv() {
-                self.throttle_texture = Some(texture);
+            loop {
+                match receiver.try_recv() {
+                    Ok(texture) => {
+                        self.throttle_texture = Some(texture);
+                    }
+                    Err(TryRecvError::Empty) => break,
+                    Err(TryRecvError::Disconnected) => {
+                        self.throttle_texture_receiver = None;
+                        break;
+                    }
+                }
             }
         }
     }
@@ -540,10 +724,23 @@ impl FftAxis {
         }
     }
 
-    pub fn show_time(&mut self, ui: &mut egui::Ui) -> egui::Response {
-        let max_freq = self.flight_data.sample_rate() / 2.0;
+    /// Returns true if FFT calculation or texture generation is in progress
+    pub fn is_processing(&self) -> bool {
+        self.chunk_receiver.is_some()
+            || self.time_texture_receiver.is_some()
+            || self.throttle_texture_receiver.is_some()
+    }
+
+    pub fn show_time(&mut self, ui: &mut egui::Ui, max_freq_override: Option<f32>) -> egui::Response {
+        let nyquist = self.flight_data.sample_rate() / 2.0;
+        let max_freq = nyquist;
+        let display_max_freq = max_freq_override.unwrap_or(self.fft_settings.max_freq_hz).min(nyquist as f32);
         let height = PLOT_HEIGHT;
         let width = ui.available_width();
+
+        // Calculate normalized y bounds from frequency settings
+        let min_y = (self.fft_settings.min_freq_hz as f64 / max_freq).min(0.99);
+        let max_y = (display_max_freq as f64 / max_freq).clamp(min_y + 0.01, 1.0);
 
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
@@ -552,8 +749,8 @@ impl FftAxis {
             .allow_drag([true, false])
             .allow_zoom([true, false])
             .allow_scroll(false)
-            .include_y(0.0)
-            .include_y(1.0)
+            .include_y(min_y)
+            .include_y(max_y)
             .link_axis("time_vibes", true, true)
             .link_cursor("global_timeseries", true, false)
             .y_axis_position(egui_plot::HPlacement::Right)
@@ -578,10 +775,16 @@ impl FftAxis {
             .response
     }
 
-    pub fn show_throttle(&mut self, ui: &mut egui::Ui) -> egui::Response {
-        let max_freq = self.flight_data.sample_rate() / 2.0;
+    pub fn show_throttle(&mut self, ui: &mut egui::Ui, max_freq_override: Option<f32>) -> egui::Response {
+        let nyquist = self.flight_data.sample_rate() / 2.0;
+        let max_freq = nyquist;
+        let display_max_freq = max_freq_override.unwrap_or(self.fft_settings.max_freq_hz).min(nyquist as f32);
         let height = PLOT_HEIGHT;
         let width = ui.available_width();
+
+        // Calculate normalized y bounds from frequency settings
+        let min_y = (self.fft_settings.min_freq_hz as f64 / max_freq).min(0.99);
+        let max_y = (display_max_freq as f64 / max_freq).clamp(min_y + 0.01, 1.0);
 
         egui_plot::Plot::new(ui.next_auto_id())
             .legend(egui_plot::Legend::default())
@@ -590,8 +793,8 @@ impl FftAxis {
             .allow_drag([true, false])
             .allow_zoom([true, false])
             .allow_scroll(false)
-            .include_y(0.0)
-            .include_y(1.0)
+            .include_y(min_y)
+            .include_y(max_y)
             .link_axis("throttle_vibes", true, true)
             .link_cursor("throttle_vibes", true, true)
             .x_axis_formatter(move |gm, _, _| format!("{:.0}%", gm.value * 100.0))
@@ -618,15 +821,15 @@ impl FftAxis {
             .response
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, domain: VibeDomain) -> egui::Response {
+    pub fn show(&mut self, ui: &mut egui::Ui, domain: VibeDomain, max_freq_override: Option<f32>) -> egui::Response {
         self.process_updates();
 
         if self.chunks.is_empty() {
             ui.label("")
         } else {
             match domain {
-                VibeDomain::Time => self.show_time(ui),
-                VibeDomain::Throttle => self.show_throttle(ui),
+                VibeDomain::Time => self.show_time(ui, max_freq_override),
+                VibeDomain::Throttle => self.show_throttle(ui, max_freq_override),
             }
         }
     }
@@ -634,6 +837,8 @@ impl FftAxis {
 
 struct FftVectorSeries {
     axes: [FftAxis; 3],
+    /// If true, limit display to sub-100Hz (like PIDtoolbox "<100Hz" option)
+    sub_100hz: bool,
 }
 
 impl FftVectorSeries {
@@ -649,7 +854,10 @@ impl FftVectorSeries {
             FftAxis::new(ctx, fft_settings.clone(), 2, fd, value_callback),
         ];
 
-        Self { axes }
+        Self { 
+            axes,
+            sub_100hz: false,  // Default to full spectrum
+        }
     }
 
     pub fn set_fft_settings(&mut self, fft_settings: FftSettings) {
@@ -657,44 +865,112 @@ impl FftVectorSeries {
         self.axes[1].set_fft_settings(fft_settings.clone());
         self.axes[2].set_fft_settings(fft_settings);
     }
+    
+    /// Set the sub-100Hz display mode for this series
+    pub fn set_sub_100hz(&mut self, sub_100hz: bool) {
+        self.sub_100hz = sub_100hz;
+    }
+    
+    /// Get the effective max frequency for display
+    pub fn effective_max_freq(&self, nyquist: f32) -> f32 {
+        if self.sub_100hz {
+            100.0
+        } else {
+            nyquist.min(self.axes[0].fft_settings.max_freq_hz)
+        }
+    }
+
+    /// Returns true if any axis is currently processing FFT data
+    pub fn is_processing(&self) -> bool {
+        self.axes.iter().any(|axis| axis.is_processing())
+    }
 
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
         domain: VibeDomain,
-        show_labels: bool,
+        _show_labels: bool,
     ) -> egui::Response {
         let available_height = ui.available_height();
-        let row_height = (available_height / 3.0).max(PLOT_HEIGHT);
+        // Reserve space for X-axis label at bottom
+        let x_label_height = 20.0;
+        let plots_height = available_height - x_label_height;
+        let row_height = (plots_height / 3.0).max(PLOT_HEIGHT);
+
+        // Y-axis label width
+        let y_label_width = 30.0;
+        
+        // Calculate max frequency override based on sub_100hz setting
+        let max_freq_override = if self.sub_100hz { Some(100.0f32) } else { None };
+
         ui.vertical(|ui| {
-            for axis in self.axes.iter_mut() {
-                let row_rect = ui
-                    .allocate_ui_with_layout(
+            for (i, axis) in self.axes.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    // Y-axis label on the left (rotated text) - outside the chart
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(y_label_width, row_height),
+                        egui::Layout::centered_and_justified(egui::Direction::TopDown),
+                        |ui| {
+                            // Draw rotated text for Y-axis label
+                            let label_text = axis.axis_name;
+                            let (rect, _response) = ui.allocate_exact_size(
+                                egui::vec2(y_label_width, row_height),
+                                egui::Sense::hover(),
+                            );
+                            let painter = ui.painter();
+
+                            // Draw vertical text (rotated 90 degrees)
+                            let galley = painter.layout_no_wrap(
+                                label_text.to_string(),
+                                egui::FontId::proportional(11.0),
+                                egui::Color32::WHITE,
+                            );
+
+                            // Calculate position for centered rotated text
+                            let text_pos = rect.center();
+                            painter.text(
+                                text_pos,
+                                egui::Align2::CENTER_CENTER,
+                                label_text,
+                                egui::FontId::proportional(11.0),
+                                egui::Color32::WHITE,
+                            );
+                        },
+                    );
+
+                    // The chart plot
+                    ui.allocate_ui_with_layout(
                         egui::vec2(ui.available_width(), row_height),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            // Plot takes the full width
-                            axis.show(ui, domain);
+                            axis.show(ui, domain, max_freq_override);
                         },
-                    )
-                    .response
-                    .rect;
+                    );
+                });
 
-                // Show axis label as overlay on top of the plot (after plot is rendered)
-                if show_labels {
-                    let label_rect = egui::Rect::from_min_size(
-                        row_rect.min + egui::vec2(5.0, 0.0),
-                        egui::vec2(30.0, row_height),
-                    );
-                    // Use a foreground layer to ensure label is on top
-                    let painter = ui.painter_at(row_rect);
-                    painter.text(
-                        label_rect.center(),
-                        egui::Align2::CENTER_CENTER,
-                        axis.axis_name,
-                        egui::FontId::proportional(11.0),
-                        egui::Color32::WHITE,
-                    );
+                // Add X-axis label only for the last row
+                if i == 2 {
+                    ui.horizontal(|ui| {
+                        // Empty space for Y-axis alignment
+                        ui.add_space(y_label_width);
+
+                        // X-axis label centered below the chart
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(ui.available_width(), x_label_height),
+                            egui::Layout::centered_and_justified(egui::Direction::LeftToRight),
+                            |ui| {
+                                let x_label = match domain {
+                                    VibeDomain::Throttle => "% Throttle",
+                                    VibeDomain::Time => "Time (s)",
+                                };
+                                ui.label(
+                                    egui::RichText::new(x_label)
+                                        .color(egui::Color32::LIGHT_GRAY)
+                                        .size(10.0),
+                                );
+                            },
+                        );
+                    });
                 }
             }
         })
@@ -715,6 +991,7 @@ pub struct VibeTab {
 
     fft_settings: FftSettings,
     max_freq_hz: f32,
+    min_freq_hz: f32,
     current_preset: AnalysisPreset,
     #[allow(dead_code)]
     show_peak_frequencies: bool,
@@ -864,6 +1141,7 @@ impl VibeTab {
 
             fft_settings,
             max_freq_hz: fd.sample_rate() as f32 / 2.0, // Nyquist
+            min_freq_hz: 0.0,                           // Default to showing all frequencies
             current_preset: AnalysisPreset::Custom,
             show_peak_frequencies: false,
             show_axis_labels: true,
@@ -922,6 +1200,17 @@ impl VibeTab {
             .set_fft_settings(self.fft_settings.clone());
     }
 
+    /// Returns true if any FFT series is currently processing
+    pub fn is_any_processing(&self) -> bool {
+        self.gyro_raw_ffts.is_processing()
+            || self.gyro_filtered_ffts.is_processing()
+            || self.dterm_raw_ffts.is_processing()
+            || self.dterm_filtered_ffts.is_processing()
+            || self.setpoint_ffts.is_processing()
+            || self.pid_error_ffts.is_processing()
+            || self.pid_sum_ffts.is_processing()
+    }
+
     pub fn show(&mut self, ui: &mut egui::Ui) {
         let old_fft_settings = self.fft_settings.clone();
         let old_preset = self.current_preset;
@@ -932,9 +1221,9 @@ impl VibeTab {
         FlexLayout::new(1200.0, "Settings")
             .add(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Domain:");
-                    ui.selectable_value(&mut self.domain, VibeDomain::Time, "🕙 Time");
-                    ui.selectable_value(&mut self.domain, VibeDomain::Throttle, "🏃 Throttle");
+                    ui.label("Domain:").on_hover_text("View mode: Time shows spectrograms over flight duration, Throttle shows by throttle position");
+                    ui.selectable_value(&mut self.domain, VibeDomain::Time, "🕙 Time").on_hover_text("Show frequency vs time (X=time, Y=frequency)");
+                    ui.selectable_value(&mut self.domain, VibeDomain::Throttle, "🏃 Throttle").on_hover_text("Show frequency vs throttle (X=throttle%, Y=frequency)");
                     ui.separator();
                     ui.label("Presets:");
                     ui.selectable_value(
@@ -970,7 +1259,7 @@ impl VibeTab {
             })
             .add(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("FFT:");
+                    ui.label("FFT:").on_hover_text("FFT window size: larger = better freq resolution but slower");
                     for size in &FFT_SIZE_OPTIONS {
                         ui.selectable_value(
                             &mut self.fft_settings.size,
@@ -979,7 +1268,7 @@ impl VibeTab {
                         );
                     }
                     ui.separator();
-                    ui.label("Step:");
+                    ui.label("Step:").on_hover_text("Samples to skip between FFT windows (lower = more detail)");
                     for value in &[1, 8, 32, 128] {
                         ui.add_enabled_ui(*value <= fft_size, |ui| {
                             ui.selectable_value(
@@ -994,7 +1283,7 @@ impl VibeTab {
             })
             .add(|ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Freq:");
+                    ui.label("Freq:").on_hover_text("Maximum frequency displayed on Y-axis");
                     for freq in &[100.0_f32, 250.0, 500.0] {
                         let label = if *freq == 100.0 {
                             "<100".to_string()
@@ -1009,7 +1298,15 @@ impl VibeTab {
                         format!("Full ({:.0})", nyquist),
                     );
                     ui.separator();
-                    ui.label("Color:");
+                    ui.label("Min Freq:").on_hover_text("Minimum frequency to display (filters out low frequencies)");
+                    ui.add(
+                        egui::DragValue::new(&mut self.min_freq_hz)
+                            .clamp_range(0.0..=self.max_freq_hz - 1.0)
+                            .speed(1.0)
+                            .suffix(" Hz"),
+                    );
+                    ui.separator();
+                    ui.label("Color:").on_hover_text("Color scheme for spectrogram visualization");
                     egui::ComboBox::from_id_source("colorscheme")
                         .selected_text(format!("{:?}", self.fft_settings.plot_colorscheme))
                         .show_ui(ui, |ui| {
@@ -1021,23 +1318,8 @@ impl VibeTab {
                                 );
                             }
                         });
-                })
-                .response
-            })
-            .add(|ui| {
-                ui.horizontal(|ui| {
-                    ui.label("Max:");
-                    ui.add(
-                        DragValue::new(&mut self.fft_settings.plot_max)
-                            .clamp_range(0.0..=100.0)
-                            .speed(0.01),
-                    );
-                    ui.checkbox(&mut self.fft_settings.auto_scale, "Auto");
                     ui.separator();
-                    ui.label("Overlays:");
-                    for band in &mut self.frequency_bands {
-                        ui.toggle_value(&mut band.enabled, &band.name);
-                    }
+                    ui.checkbox(&mut self.fft_settings.auto_scale, "Auto Scale").on_hover_text("Automatically normalize each chart to its own max value");
                 })
                 .response
             })
@@ -1068,6 +1350,10 @@ impl VibeTab {
             self.current_preset = AnalysisPreset::Custom;
         }
 
+        // Sync frequency bounds to fft_settings
+        self.fft_settings.min_freq_hz = self.min_freq_hz;
+        self.fft_settings.max_freq_hz = self.max_freq_hz;
+
         if self.fft_settings != old_fft_settings {
             self.fft_settings.step_size =
                 usize::min(self.fft_settings.step_size, self.fft_settings.size);
@@ -1095,7 +1381,7 @@ impl VibeTab {
             usize::MAX // No columns enabled
         };
 
-        // Display 4 columns with equal widths like PIDToolbox
+        // Display columns with equal widths like PIDToolbox
         let enabled_columns: Vec<(bool, &str, &mut FftVectorSeries, usize)> = vec![
             (
                 self.gyro_raw_enabled,
@@ -1121,6 +1407,24 @@ impl VibeTab {
                 &mut self.dterm_filtered_ffts,
                 3,
             ),
+            (
+                self.setpoint_enabled,
+                "Setpoint",
+                &mut self.setpoint_ffts,
+                4,
+            ),
+            (
+                self.pid_error_enabled,
+                "PID Error",
+                &mut self.pid_error_ffts,
+                5,
+            ),
+            (
+                self.pid_sum_enabled,
+                "PID Sum",
+                &mut self.pid_sum_ffts,
+                6,
+            ),
         ];
 
         let active_columns: Vec<_> = enabled_columns
@@ -1135,11 +1439,36 @@ impl VibeTab {
         let num_cols = active_columns.len();
         let domain = self.domain;
 
-        ui.columns(num_cols, |columns| {
-            for (i, (_, title, fft_series, _)) in active_columns.into_iter().enumerate() {
-                columns[i].heading(title);
-                fft_series.show(&mut columns[i], domain, i == 0);
-            }
-        });
+        // Fixed width per column to ensure proper display and scrolling
+        let col_width = 300.0;
+        let total_width = num_cols as f32 * col_width;
+
+        egui::ScrollArea::horizontal()
+            .auto_shrink([false, false])
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    for (i, (_, title, fft_series, _)) in active_columns.into_iter().enumerate() {
+                        ui.allocate_ui_with_layout(
+                            egui::vec2(col_width, ui.available_height()),
+                            egui::Layout::top_down(egui::Align::LEFT),
+                            |ui| {
+                                // Column header with title and <100Hz checkbox
+                                ui.horizontal(|ui| {
+                                    ui.heading(title);
+                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                        let mut sub_100hz = fft_series.sub_100hz;
+                                        if ui.checkbox(&mut sub_100hz, "<100Hz").changed() {
+                                            fft_series.set_sub_100hz(sub_100hz);
+                                        }
+                                    });
+                                });
+                                // Draw colorbar legend
+                                self.fft_settings.draw_colorbar(ui, col_width - 10.0);
+                                fft_series.show(ui, domain, i == 0);
+                            },
+                        );
+                    }
+                });
+            });
     }
 }

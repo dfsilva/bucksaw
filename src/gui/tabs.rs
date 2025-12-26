@@ -61,3 +61,22 @@ impl Display for FlightViewTab {
         write!(f, "{val}",)
     }
 }
+
+impl FlightViewTab {
+    /// Returns a clean name suitable for analytics tracking
+    pub fn analytics_name(&self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard",
+            Self::Plot => "Plot",
+            Self::Tune => "Tune",
+            Self::Vibe => "Vibe",
+            Self::Stats => "Stats",
+            Self::Anomalies => "Anomalies",
+            Self::Error => "Error",
+            Self::Setup => "Setup",
+            Self::Suggestions => "Suggestions",
+            Self::Filter => "Filter",
+            Self::Logs => "Logs",
+        }
+    }
+}
