@@ -214,9 +214,16 @@ pub struct FilterEffectivenessScore {
     pub gyro_filtering_score: f32,
     pub dterm_noise_score: f32,
     pub config_quality_score: f32,
+    /// Estimated filter latency in milliseconds
+    pub estimated_latency_ms: f32,
+    /// Latency assessment (Low/Moderate/High)
+    pub latency_assessment: String,
+    /// Latency color
+    pub latency_color: Color32,
     /// Detailed breakdown
     pub summary: String,
 }
+
 
 impl FilterEffectivenessScore {
     /// Calculate comprehensive filter effectiveness score
@@ -302,6 +309,69 @@ impl FilterEffectivenessScore {
             _ => ("F".to_string(), Color32::from_rgb(255, 100, 100)),
         };
         
+        // === LATENCY ESTIMATION ===
+        // Estimate filter delay based on cutoff frequencies
+        // For a 2nd order Butterworth LPF, group delay ≈ 0.32 / f_cutoff (at low frequencies)
+        // We accumulate delay from multiple filter stages
+        
+        let mut total_delay_ms = 0.0f32;
+        
+        // Gyro LPF1 delay
+        if settings.gyro_lpf1_hz > 0.0 {
+            // PT1: delay ≈ 1 / (2 * pi * fc) * 1000ms
+            // Simplified: delay_ms ≈ 159 / fc
+            total_delay_ms += 159.0 / settings.gyro_lpf1_hz;
+        } else if settings.gyro_dyn_lpf_enabled() {
+            // Use average of dynamic range
+            let avg_hz = (settings.gyro_lpf1_dyn_min + settings.gyro_lpf1_dyn_max) / 2.0;
+            if avg_hz > 0.0 {
+                total_delay_ms += 159.0 / avg_hz;
+            }
+        }
+        
+        // Gyro LPF2 delay
+        if settings.gyro_lpf2_hz > 0.0 {
+            total_delay_ms += 159.0 / settings.gyro_lpf2_hz;
+        }
+        
+        // D-term LPF1 delay (only affects D-term, but still adds to overall feel)
+        if settings.dterm_lpf1_hz > 0.0 {
+            total_delay_ms += 159.0 / settings.dterm_lpf1_hz * 0.5; // Weight D-term less
+        }
+        
+        // D-term LPF2 delay
+        if settings.dterm_lpf2_hz > 0.0 {
+            total_delay_ms += 159.0 / settings.dterm_lpf2_hz * 0.5;
+        }
+        
+        // Notch filters add some delay (typically ~0.5-1ms each)
+        if settings.gyro_notch1_hz > 0.0 {
+            total_delay_ms += 0.5;
+        }
+        if settings.gyro_notch2_hz > 0.0 {
+            total_delay_ms += 0.5;
+        }
+        
+        // RPM filter adds minimal delay when properly configured
+        if settings.rpm_filter_enabled() {
+            total_delay_ms += 0.3 * settings.rpm_filter_harmonics as f32;
+        }
+        
+        score.estimated_latency_ms = total_delay_ms;
+        
+        // Assess latency level
+        (score.latency_assessment, score.latency_color) = if total_delay_ms < 3.0 {
+            ("Very Low".to_string(), Color32::from_rgb(0, 255, 100))
+        } else if total_delay_ms < 6.0 {
+            ("Low".to_string(), Color32::from_rgb(100, 255, 100))
+        } else if total_delay_ms < 10.0 {
+            ("Moderate".to_string(), Color32::from_rgb(255, 255, 100))
+        } else if total_delay_ms < 15.0 {
+            ("High".to_string(), Color32::from_rgb(255, 180, 100))
+        } else {
+            ("Very High".to_string(), Color32::from_rgb(255, 100, 100))
+        };
+        
         // Generate summary
         score.summary = if score.overall_score >= 85.0 {
             "Excellent filter configuration. Noise is well controlled.".to_string()
@@ -316,6 +386,7 @@ impl FilterEffectivenessScore {
         score
     }
 }
+
 
 /// Motor RPM data for harmonic visualization
 #[allow(dead_code)]
@@ -783,8 +854,30 @@ impl FilterTab {
             draw_score_bar(ui, "Config Quality:", score.config_quality_score, "Filter configuration (RPM filter, dynamic LPF, etc.)");
             
             ui.add_space(8.0);
+            
+            // === LATENCY DISPLAY ===
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Estimated Latency:").strong());
+                ui.label(
+                    RichText::new(format!("{:.1}ms", score.estimated_latency_ms))
+                        .color(score.latency_color)
+                        .strong()
+                );
+                ui.label(
+                    RichText::new(format!("({})", score.latency_assessment))
+                        .color(score.latency_color)
+                );
+            });
+            ui.label(
+                RichText::new("Lower latency = snappier response. Higher latency = more noise reduction.")
+                    .weak()
+                    .small()
+            );
+            
+            ui.add_space(8.0);
             ui.separator();
             ui.add_space(4.0);
+
             
             // Noise reduction per axis
             ui.label(RichText::new("Per-Axis Noise Reduction").strong());

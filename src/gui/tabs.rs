@@ -1,6 +1,9 @@
 mod anomalies;
 mod dashboard;
 mod error;
+mod feedforward;
+mod tuning_guide;
+
 mod filter;
 mod logs;
 mod plot;
@@ -15,6 +18,9 @@ use std::fmt::Display;
 pub use anomalies::*;
 pub use dashboard::*;
 pub use error::*;
+pub use feedforward::*;
+pub use tuning_guide::*;
+
 pub use filter::*;
 pub use logs::*;
 pub use plot::*;
@@ -41,6 +47,8 @@ pub enum FlightViewTab {
     Suggestions,
     Filter,
     Logs,
+    Feedforward,
+    TuningGuide,
 }
 
 impl Display for FlightViewTab {
@@ -57,7 +65,10 @@ impl Display for FlightViewTab {
             Self::Suggestions => "💡 Suggestions",
             Self::Filter => "🔧 Filter",
             Self::Logs => "📜 Logs",
+            Self::Feedforward => "🚀 Feedforward",
+            Self::TuningGuide => "🎓 Guide",
         };
+
         write!(f, "{val}",)
     }
 }
@@ -77,6 +88,8 @@ impl FlightViewTab {
             Self::Suggestions => "Suggestions",
             Self::Filter => "Filter",
             Self::Logs => "Logs",
+            Self::Feedforward => "Feedforward",
+            Self::TuningGuide => "TuningGuide",
         }
     }
 }

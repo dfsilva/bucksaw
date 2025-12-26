@@ -78,6 +78,35 @@ impl AnomalyType {
             Self::ITermWindup => "I-Term Windup",
         }
     }
+    pub fn explanation(&self) -> &'static str {
+        match self {
+            Self::Desync => "Motor lost synchronization with ESC. This usually causes a tumble or crash.",
+            Self::MotorSaturation => "Motors reached 100% output. The drone has no control authority left on at least one axis.",
+            Self::MidThrottleOscillation => "Oscillations around 30-50% throttle, often caused by mechanical resonance or excessive D-gain.",
+            Self::HighVibration => "Excessive G-force/vibration detected (>4G). Causes gyro noise and hot motors.",
+            Self::RadioFailsafe => "Radio link lost or signal quality dropped below critical threshold.",
+            Self::GyroNoiseSpike => "Sudden spike in gyro data not caused by pilot input. Likely electrical noise or loose sensor.",
+            Self::BatteryVoltageSag => "Voltage dropped significantly (>0.5V) under load, indicating weak battery or high resistance.",
+            Self::PropWash => "Oscillations during descent/wash. The prop works in its own turbulent air.",
+            Self::MotorImbalance => "Significant difference in motor RPM/Output. Likely CG off-center, bent prop, or weak motor.",
+            Self::ITermWindup => "I-term growing without correcting error. Usually heading drift or mechanical binding.",
+        }
+    }
+
+    pub fn recommendation(&self) -> &'static str {
+        match self {
+            Self::Desync => "Check motor screws, wiring, and Bell integrity. Increase Motor Timing or PWM frequency.",
+            Self::MotorSaturation => "Over-propped or under-powered. Reduce prop pitch/size, or reduce weight. Check CG.",
+            Self::MidThrottleOscillation => "Check for loose frame screws/arms. If mechanical is OK, lower TPA or D-gain.",
+            Self::HighVibration => "Check broken props, loose stack screws, or frame cracks. Soft-mount FC.",
+            Self::RadioFailsafe => "Check antenna placement (90 deg apart). Inspect receiver wiring.",
+            Self::GyroNoiseSpike => "Check FC mounting isolation. Ensure no wires touch the gyro chip.",
+            Self::BatteryVoltageSag => "Check battery internal resistance (IR). Inspect XT60 solder joints.",
+            Self::PropWash => "Increase D-gain slightly. Raise Dynamic Idle RPM. Check 'Propwash' mode in Suggestions.",
+            Self::MotorImbalance => "Check Center of Gravity (CG). Swap props. Inspect motor bearings.",
+            Self::ITermWindup => "Increase I-gain if drifting. If during punch-out, tune Anti-Gravity.",
+        }
+    }
 }
 
 pub struct AnomalyEvent {
@@ -507,6 +536,26 @@ impl AnomaliesTab {
 
                             // Description
                             ui.label(&event.description);
+                        });
+
+                        // Expandable details (always show for now, or use collapsing header if preferred)
+                        // Using a small indentation for clarity
+                        ui.indent("anomaly_details", |ui| {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("❓ Analysis:").strong().size(11.0));
+                                ui.label(
+                                    RichText::new(event.anomaly_type.explanation()).size(11.0),
+                                );
+                            });
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new("🛠 Fix:").strong().size(11.0));
+                                ui.label(
+                                    RichText::new(event.anomaly_type.recommendation())
+                                        .size(11.0)
+                                        .color(Color32::LIGHT_BLUE),
+                                );
+                            });
                         });
                     });
 

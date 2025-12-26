@@ -376,11 +376,7 @@ impl FftAxis {
         let mut smoothed = vec![vec![0.0f32; height]; width];
 
         // Gaussian-like 3x3 kernel (approximation)
-        let kernel = [
-            [1.0, 2.0, 1.0],
-            [2.0, 4.0, 2.0],
-            [1.0, 2.0, 1.0],
-        ];
+        let kernel = [[1.0, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]];
 
         for x in 0..width {
             for y in 0..height {
@@ -511,7 +507,7 @@ impl FftAxis {
 
             let mut throttle_averages: Vec<Option<Vec<f32>>> = Vec::new();
             let fft_output_size = fft_size / 2; // realfft output is N/2+1, we skip DC so N/2
-            
+
             for bucket in throttle_buckets.into_iter() {
                 let size = bucket.len();
                 if size == 0 {
@@ -520,8 +516,11 @@ impl FftAxis {
                 }
 
                 // Get actual FFT size from first chunk in bucket
-                let first_fft_len = bucket.first().map(|c| c.fft.len()).unwrap_or(fft_output_size);
-                
+                let first_fft_len = bucket
+                    .first()
+                    .map(|c| c.fft.len())
+                    .unwrap_or(fft_output_size);
+
                 let avg = bucket
                     .into_iter()
                     .map(|chunk| chunk.fft)
@@ -584,17 +583,16 @@ impl FftAxis {
 
             let width = THROTTLE_DOMAIN_BUCKETS;
             // Use actual height from the data
-            let height = throttle_averages.first().map(|v| v.len()).unwrap_or(fft_output_size);
-            
+            let height = throttle_averages
+                .first()
+                .map(|v| v.len())
+                .unwrap_or(fft_output_size);
+
             // Apply a simple 3x3 smoothing filter like PIDtoolbox's Gaussian filter
-            let kernel = [
-                [1.0f32, 2.0, 1.0],
-                [2.0, 4.0, 2.0],
-                [1.0, 2.0, 1.0],
-            ];
-            
+            let kernel = [[1.0f32, 2.0, 1.0], [2.0, 4.0, 2.0], [1.0, 2.0, 1.0]];
+
             let mut smoothed = vec![vec![0.0f32; height]; width];
-            
+
             for x in 0..width {
                 for y in 0..height {
                     let mut sum = 0.0f32;
@@ -617,10 +615,7 @@ impl FftAxis {
                 }
             }
 
-            let mut image = egui::ColorImage::new(
-                [width, height],
-                Color32::TRANSPARENT,
-            );
+            let mut image = egui::ColorImage::new([width, height], Color32::TRANSPARENT);
 
             // Find actual max value from the smoothed data for normalization
             // Use fixed scale if auto_scale is disabled
@@ -731,10 +726,20 @@ impl FftAxis {
             || self.throttle_texture_receiver.is_some()
     }
 
-    pub fn show_time(&mut self, ui: &mut egui::Ui, max_freq_override: Option<f32>) -> egui::Response {
+    pub fn show_time(
+        &mut self,
+        ui: &mut egui::Ui,
+        max_freq_override: Option<f32>,
+        bands: &[FrequencyBand],
+        show_rpm: bool,
+    ) -> egui::Response {
+        self.process_updates();
         let nyquist = self.flight_data.sample_rate() / 2.0;
+
         let max_freq = nyquist;
-        let display_max_freq = max_freq_override.unwrap_or(self.fft_settings.max_freq_hz).min(nyquist as f32);
+        let display_max_freq = max_freq_override
+            .unwrap_or(self.fft_settings.max_freq_hz)
+            .min(nyquist as f32);
         let height = PLOT_HEIGHT;
         let width = ui.available_width();
 
@@ -771,14 +776,69 @@ impl FftAxis {
 
                     plot_ui.image(plot_image);
                 }
+
+                // Draw Annotations Overlay
+                for band in bands {
+                    if band.enabled {
+                        let y_min = band.min_hz as f64 / max_freq as f64;
+                        let y_max = band.max_hz as f64 / max_freq as f64;
+                        let full_time = self.flight_data.times.last().copied().unwrap_or(100.0);
+                        
+                        // Fill band
+                        let points = egui_plot::PlotPoints::new(vec![
+                            [0.0, y_min], [full_time, y_min], [full_time, y_max], [0.0, y_max]
+                        ]);
+                        plot_ui.polygon(egui_plot::Polygon::new(points).fill_color(band.color).name(&band.name));
+                    }
+                }
+
+                if show_rpm {
+                     if let Some(rpm) = self.flight_data.electrical_rpm() {
+                       if !rpm.is_empty() && !rpm[0].is_empty() {
+                            let times = &self.flight_data.times;
+                            let len = times.len().min(rpm[0].len());
+                            
+                            for harmonic in 1..=3 {
+                                let points: egui_plot::PlotPoints = (0..len).step_by(5).map(|i| {
+                                     let mut sum_erpm = 0.0;
+                                     let mut count = 0;
+                                     for m in 0..rpm.len() {
+                                         if let Some(val) = rpm[m].get(i) {
+                                             sum_erpm += val;
+                                             count += 1;
+                                         }
+                                     }
+                                     let avg_erpm = if count > 0 { sum_erpm / count as f32 } else { 0.0 };
+                                     let mech_hz = avg_erpm / 420.0; // 14 poles assumed
+                                     [times[i], (mech_hz * harmonic as f32 / max_freq as f32) as f64]
+                                }).collect();
+                                
+                               plot_ui.line(egui_plot::Line::new(points)
+                                   .color(egui::Color32::from_rgba_unmultiplied(255, 255, 0, 150))
+                                   .width(1.5)
+                                   .name(format!("{}x Motor", harmonic)));
+                            }
+                       }
+                   }
+                }
             })
             .response
     }
 
-    pub fn show_throttle(&mut self, ui: &mut egui::Ui, max_freq_override: Option<f32>) -> egui::Response {
+    pub fn show_throttle(
+        &mut self,
+        ui: &mut egui::Ui,
+        max_freq_override: Option<f32>,
+        bands: &[FrequencyBand],
+        show_rpm: bool,
+    ) -> egui::Response {
+        self.process_updates();
         let nyquist = self.flight_data.sample_rate() / 2.0;
+
         let max_freq = nyquist;
-        let display_max_freq = max_freq_override.unwrap_or(self.fft_settings.max_freq_hz).min(nyquist as f32);
+        let display_max_freq = max_freq_override
+            .unwrap_or(self.fft_settings.max_freq_hz)
+            .min(nyquist as f32);
         let height = PLOT_HEIGHT;
         let width = ui.available_width();
 
@@ -817,22 +877,73 @@ impl FftAxis {
 
                     plot_ui.image(plot_image);
                 }
+
+                // Draw Annotations Overlay
+                for band in bands {
+                    if band.enabled {
+                        let y_min = band.min_hz as f64 / max_freq as f64;
+                        let y_max = band.max_hz as f64 / max_freq as f64;
+                        // Full throttle range 0.0 to 1.0
+                        let points = egui_plot::PlotPoints::new(vec![
+                            [0.0, y_min], [1.0, y_min], [1.0, y_max], [0.0, y_max]
+                        ]);
+                        plot_ui.polygon(egui_plot::Polygon::new(points).fill_color(band.color).name(&band.name));
+                    }
+                }
+
+                if show_rpm {
+                     if let Some(rpm) = self.flight_data.electrical_rpm() {
+                       // Find approximate max RPM
+                       let mut max_erpm = 0.0f32;
+                       for m in rpm {
+                           for &val in m.iter().step_by(100) { // sparse check
+                               if val > max_erpm { max_erpm = val; }
+                           }
+                       }
+                       
+                       if max_erpm > 0.0 {
+                            let max_mech_hz = max_erpm / 420.0; // 14 poles
+                            for harmonic in 1..=3 {
+                                // Linear approximation: Hz = MaxHz * Throttle
+                                let points = egui_plot::PlotPoints::new(vec![
+                                    [0.0, 0.0],
+                                    [1.0, (max_mech_hz * harmonic as f32 / max_freq as f32) as f64]
+                                ]);
+                                
+                               plot_ui.line(egui_plot::Line::new(points)
+                                   .color(Color32::from_rgba_unmultiplied(255, 255, 0, 150))
+                                   .width(1.5)
+                                   .name(format!("{}x Motor (Est)", harmonic)));
+                            }
+                       }
+                   }
+                }
             })
+
+
             .response
     }
 
-    pub fn show(&mut self, ui: &mut egui::Ui, domain: VibeDomain, max_freq_override: Option<f32>) -> egui::Response {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        domain: VibeDomain,
+        max_freq_override: Option<f32>,
+        bands: &[FrequencyBand],
+        show_rpm: bool,
+    ) -> egui::Response {
         self.process_updates();
 
         if self.chunks.is_empty() {
             ui.label("")
         } else {
             match domain {
-                VibeDomain::Time => self.show_time(ui, max_freq_override),
-                VibeDomain::Throttle => self.show_throttle(ui, max_freq_override),
+                VibeDomain::Time => self.show_time(ui, max_freq_override, bands, show_rpm),
+                VibeDomain::Throttle => self.show_throttle(ui, max_freq_override, bands, show_rpm),
             }
         }
     }
+
 }
 
 struct FftVectorSeries {
@@ -854,9 +965,9 @@ impl FftVectorSeries {
             FftAxis::new(ctx, fft_settings.clone(), 2, fd, value_callback),
         ];
 
-        Self { 
+        Self {
             axes,
-            sub_100hz: false,  // Default to full spectrum
+            sub_100hz: false, // Default to full spectrum
         }
     }
 
@@ -865,12 +976,12 @@ impl FftVectorSeries {
         self.axes[1].set_fft_settings(fft_settings.clone());
         self.axes[2].set_fft_settings(fft_settings);
     }
-    
+
     /// Set the sub-100Hz display mode for this series
     pub fn set_sub_100hz(&mut self, sub_100hz: bool) {
         self.sub_100hz = sub_100hz;
     }
-    
+
     /// Get the effective max frequency for display
     pub fn effective_max_freq(&self, nyquist: f32) -> f32 {
         if self.sub_100hz {
@@ -890,6 +1001,8 @@ impl FftVectorSeries {
         ui: &mut egui::Ui,
         domain: VibeDomain,
         _show_labels: bool,
+        bands: &[FrequencyBand],
+        show_rpm: bool,
     ) -> egui::Response {
         let available_height = ui.available_height();
         // Reserve space for X-axis label at bottom
@@ -899,7 +1012,7 @@ impl FftVectorSeries {
 
         // Y-axis label width
         let y_label_width = 30.0;
-        
+
         // Calculate max frequency override based on sub_100hz setting
         let max_freq_override = if self.sub_100hz { Some(100.0f32) } else { None };
 
@@ -943,7 +1056,10 @@ impl FftVectorSeries {
                         egui::vec2(ui.available_width(), row_height),
                         egui::Layout::left_to_right(egui::Align::Center),
                         |ui| {
-                            axis.show(ui, domain, max_freq_override);
+                            match domain {
+                                VibeDomain::Time => axis.show_time(ui, max_freq_override, bands, show_rpm),
+                                VibeDomain::Throttle => axis.show_throttle(ui, max_freq_override, bands, show_rpm),
+                            };
                         },
                     );
                 });
@@ -976,6 +1092,7 @@ impl FftVectorSeries {
         })
         .response
     }
+
 }
 
 pub struct VibeTab {
@@ -996,7 +1113,9 @@ pub struct VibeTab {
     #[allow(dead_code)]
     show_peak_frequencies: bool,
     #[allow(dead_code)]
+    #[allow(dead_code)]
     show_axis_labels: bool,
+    show_rpm_harmonics: bool,
 
     // Frequency band overlays
     frequency_bands: Vec<FrequencyBand>,
@@ -1144,7 +1263,9 @@ impl VibeTab {
             min_freq_hz: 0.0,                           // Default to showing all frequencies
             current_preset: AnalysisPreset::Custom,
             show_peak_frequencies: false,
+
             show_axis_labels: true,
+            show_rpm_harmonics: false, // Default off
 
             // Initialize frequency bands with common ranges
             frequency_bands: vec![
@@ -1200,6 +1321,48 @@ impl VibeTab {
             .set_fft_settings(self.fft_settings.clone());
     }
 
+    /// Get debug mode information from log headers
+    fn get_debug_mode_info(&self) -> Option<(String, String, egui::Color32)> {
+        let debug_mode = self.fd.unknown_headers.get("debug_mode")?;
+
+        let (description, color) = match debug_mode.to_uppercase().as_str() {
+            "GYRO_SCALED" | "GYRO" => (
+                "Shows pre vs post-filter gyro data. Compare raw gyro noise to filtered output to evaluate filter effectiveness.",
+                egui::Color32::from_rgb(100, 200, 255)
+            ),
+            "D_LPF" | "DTERM_FILTER" => (
+                "D-term filter debugging. Shows D-term before and after filtering - useful for optimizing D-term LPF settings.",
+                egui::Color32::from_rgb(255, 180, 100)
+            ),
+            "RPM_FILTER" => (
+                "RPM filter debugging. Shows motor harmonics and filter effectiveness at removing motor noise.",
+                egui::Color32::from_rgb(100, 255, 180)
+            ),
+            "DYNAMIC_FILTER" | "DYN_NOTCH" => (
+                "Dynamic notch filter tracking. Shows how the notch filters are following frame resonances.",
+                egui::Color32::from_rgb(180, 100, 255)
+            ),
+            "GYRO_RAW" => (
+                "Raw gyro output before any filtering. Useful for seeing all noise sources.",
+                egui::Color32::from_rgb(255, 100, 100)
+            ),
+            "FEEDFORWARD" | "FF" => (
+                "Feedforward debugging. Shows feedforward contribution to overall PID output.",
+                egui::Color32::from_rgb(255, 255, 100)
+            ),
+            "PIDLOOP" | "PID_LOOP" => (
+                "Full PID loop timing. Shows loop execution times for performance analysis.",
+                egui::Color32::from_rgb(200, 200, 200)
+            ),
+            _ => (
+                "Debug data available. Check debug channels in log for specialized analysis.",
+                egui::Color32::from_rgb(150, 150, 150)
+            ),
+        };
+
+        Some((debug_mode.clone(), description.to_string(), color))
+    }
+
     /// Returns true if any FFT series is currently processing
     pub fn is_any_processing(&self) -> bool {
         self.gyro_raw_ffts.is_processing()
@@ -1218,7 +1381,24 @@ impl VibeTab {
         let sample_rate = self.fd.sample_rate() as f32;
         let nyquist = sample_rate / 2.0;
 
+        // === DEBUG MODE INFO PANEL ===
+        if let Some((mode_name, description, color)) = self.get_debug_mode_info() {
+            egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha(60))
+                .rounding(4.0)
+                .inner_margin(8.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.label(egui::RichText::new("🔬 Debug Mode:").strong());
+                        ui.label(egui::RichText::new(&mode_name).color(color).strong());
+                    });
+                    ui.label(egui::RichText::new(&description).weak().small());
+                });
+            ui.add_space(8.0);
+        }
+
         FlexLayout::new(1200.0, "Settings")
+
             .add(|ui| {
                 ui.horizontal(|ui| {
                     ui.label("Domain:").on_hover_text("View mode: Time shows spectrograms over flight duration, Throttle shows by throttle position");
@@ -1323,7 +1503,24 @@ impl VibeTab {
                 })
                 .response
             })
+            .add(|ui| {
+                 ui.horizontal(|ui| {
+                    ui.label("Overlays:");
+                    ui.checkbox(&mut self.show_rpm_harmonics, "RPM").on_hover_text("Show 1x, 2x, 3x motor harmonics based on eRPM");
+                    
+                    ui.menu_button("Bands", |ui| {
+                        for band in &mut self.frequency_bands {
+                            ui.horizontal(|ui| {
+                                ui.checkbox(&mut band.enabled, &band.name);
+                                ui.color_edit_button_srgba(&mut band.color);
+                            });
+                        }
+                    });
+                })
+                .response
+            })
             .show(ui);
+
 
         // Apply preset settings only when preset changes
         if old_preset != self.current_preset {
@@ -1419,12 +1616,7 @@ impl VibeTab {
                 &mut self.pid_error_ffts,
                 5,
             ),
-            (
-                self.pid_sum_enabled,
-                "PID Sum",
-                &mut self.pid_sum_ffts,
-                6,
-            ),
+            (self.pid_sum_enabled, "PID Sum", &mut self.pid_sum_ffts, 6),
         ];
 
         let active_columns: Vec<_> = enabled_columns
@@ -1455,19 +1647,23 @@ impl VibeTab {
                                 // Column header with title and <100Hz checkbox
                                 ui.horizontal(|ui| {
                                     ui.heading(title);
-                                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                        let mut sub_100hz = fft_series.sub_100hz;
-                                        if ui.checkbox(&mut sub_100hz, "<100Hz").changed() {
-                                            fft_series.set_sub_100hz(sub_100hz);
-                                        }
-                                    });
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::Center),
+                                        |ui| {
+                                            let mut sub_100hz = fft_series.sub_100hz;
+                                            if ui.checkbox(&mut sub_100hz, "<100Hz").changed() {
+                                                fft_series.set_sub_100hz(sub_100hz);
+                                            }
+                                        },
+                                    );
                                 });
                                 // Draw colorbar legend
                                 self.fft_settings.draw_colorbar(ui, col_width - 10.0);
-                                fft_series.show(ui, domain, i == 0);
+                                fft_series.show(ui, domain, i == 0, &self.frequency_bands, self.show_rpm_harmonics);
                             },
                         );
                     }
+
                 });
             });
     }

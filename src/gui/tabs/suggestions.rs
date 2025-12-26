@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use egui::{Color32, RichText, Ui};
 
-use crate::analytics;
 use crate::ai_integration::{
     AIAnalysisResult, AIModel, AnalysisFocus, FlightMetrics, ModelFetchResult, OpenRouterClient,
     DEFAULT_MODELS,
 };
+use crate::analytics;
 use crate::flight_data::FlightData;
 use crate::step_response::{calculate_step_response, SmoothingLevel};
 
@@ -85,6 +85,37 @@ struct AnalysisResults {
     avg_throttle_pct: f32,  // Average throttle percentage
     throttle_variance: f32, // How much throttle varies
     flight_duration: f64,   // Duration in seconds
+
+    // Throttle-segmented PID analysis [axis][throttle_band: 0=low, 1=mid, 2=high]
+    tracking_error_by_throttle: [[f32; 3]; 3], // Per-axis, per-throttle-band tracking error
+    worst_throttle_band: usize, // Which throttle range has worst tracking (0=low, 1=mid, 2=high)
+
+    // Propwash analysis
+    propwash_severity: f32,        // 0-100 score, higher = worse propwash
+    propwash_events: usize,        // Number of detected propwash events
+    propwash_worst_axis: usize,    // 0=Roll, 1=Pitch, 2=Yaw - most affected axis
+    propwash_avg_oscillation: f32, // Average oscillation amplitude during events
+
+    // Lag analysis
+    system_latency_ms: [f32; 3], // Per-axis latency from setpoint to gyro response
+    avg_latency_ms: f32,         // Average system latency
+
+    // I-term analysis
+    iterm_windup_events: usize, // Count of I-term saturation events
+    iterm_drift: [f32; 3],      // I-term slow drift per axis
+
+    // Motor balance analysis
+    motor_avg_output: [f32; 4],   // Per-motor average output percentage
+    motor_imbalance_pct: f32,     // Overall imbalance percentage (0=perfect, >10=concerning)
+    motor_imbalance_pair: String, // Which motor pair shows most imbalance ("Front-Back" or "Left-Right")
+    motor_worst_idx: usize,       // Motor index with highest average (0-3)
+    motor_differential: f32,      // Max - Min motor difference
+
+    // Feedforward analysis
+    ff_effectiveness: f32, // 0-100 score: how well FF anticipates setpoint changes
+    setpoint_jitter: f32,  // Average high-freq noise in setpoint (indicates RC link issues)
+    max_stick_rate: [f32; 3], // Maximum observed stick rate per axis (deg/s²)
+    ff_delay_compensation: f32, // Estimated delay being compensated by FF (ms)
 }
 
 impl AnalysisResults {
@@ -306,7 +337,67 @@ impl AnalysisResults {
             + gyro_noise_by_throttle[2][2])
             / 3.0;
 
+        // === THROTTLE-SEGMENTED TRACKING ERROR ===
+        // Compute tracking error (setpoint - gyro) for each axis at each throttle band
+        let mut tracking_error_by_throttle = [[0.0f32; 3]; 3];
+        let mut throttle_band_sample_counts = [[0usize; 3]; 3];
+
+        if let (Some(setpoint), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
+            let throttle = &setpoint[3]; // Throttle is 4th channel
+
+            for axis in 0..3 {
+                for i in 0..setpoint[axis]
+                    .len()
+                    .min(gyro[axis].len())
+                    .min(throttle.len())
+                {
+                    // Determine throttle band (0=low <30%, 1=mid 30-70%, 2=high >70%)
+                    let thr_pct = (throttle[i] / 1000.0) * 100.0; // Assuming 0-1000 scale
+                    let band = if thr_pct < 30.0 {
+                        0
+                    } else if thr_pct < 70.0 {
+                        1
+                    } else {
+                        2
+                    };
+
+                    let error = (setpoint[axis][i] - gyro[axis][i]).abs();
+                    tracking_error_by_throttle[axis][band] += error * error; // Sum of squares
+                    throttle_band_sample_counts[axis][band] += 1;
+                }
+            }
+
+            // Convert to RMS
+            for axis in 0..3 {
+                for band in 0..3 {
+                    if throttle_band_sample_counts[axis][band] > 0 {
+                        tracking_error_by_throttle[axis][band] = (tracking_error_by_throttle[axis]
+                            [band]
+                            / throttle_band_sample_counts[axis][band] as f32)
+                            .sqrt();
+                    }
+                }
+            }
+        }
+
+        // Find worst throttle band (highest average error across axes)
+        let band_errors: Vec<f32> = (0..3)
+            .map(|band| {
+                (tracking_error_by_throttle[0][band]
+                    + tracking_error_by_throttle[1][band]
+                    + tracking_error_by_throttle[2][band])
+                    / 3.0
+            })
+            .collect();
+        let worst_throttle_band = band_errors
+            .iter()
+            .enumerate()
+            .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+            .map(|(i, _)| i)
+            .unwrap_or(1);
+
         // Motor saturation analysis
+
         let mut motor_saturation_pct = 0.0f32;
         let mut motor_desync_risk = false;
         let mut motor_saturation_sustained = false;
@@ -370,6 +461,287 @@ impl AnalysisResults {
             }
         }
 
+        // === PROPWASH DETECTION ===
+        // Propwash occurs when drone descends through its own turbulent air
+        // Signature: rapid throttle reduction followed by oscillations
+        let mut propwash_events = 0usize;
+        let mut propwash_oscillation_sum = 0.0f32;
+        let mut propwash_axis_counts = [0usize; 3];
+
+        if let Some(motors) = fd.motor() {
+            if motors.len() >= 4 && !motors[0].is_empty() {
+                let window_size = (sample_rate * 0.1) as usize; // 100ms window
+                let gyro = fd.gyro_filtered();
+
+                for i in window_size..throttle_values.len().saturating_sub(window_size) {
+                    // Detect rapid throttle drop (>20% reduction in 100ms)
+                    let throttle_before = throttle_values[i.saturating_sub(window_size)];
+                    let throttle_now = throttle_values[i];
+                    let throttle_drop = throttle_before - throttle_now;
+
+                    if throttle_drop > 20.0 {
+                        // Check for oscillations in the following window
+                        if let Some(gyro_data) = gyro {
+                            for axis in 0..3 {
+                                if i + window_size < gyro_data[axis].len() {
+                                    // Calculate oscillation amplitude in post-drop window
+                                    let post_window: Vec<f32> =
+                                        gyro_data[axis][i..i + window_size].to_vec();
+                                    if post_window.len() > 2 {
+                                        let mean: f32 = post_window.iter().sum::<f32>()
+                                            / post_window.len() as f32;
+                                        let oscillation: f32 = post_window
+                                            .iter()
+                                            .map(|v| (v - mean).abs())
+                                            .sum::<f32>()
+                                            / post_window.len() as f32;
+
+                                        // If oscillation exceeds threshold, count as propwash event
+                                        if oscillation > 15.0 {
+                                            propwash_events += 1;
+                                            propwash_oscillation_sum += oscillation;
+                                            propwash_axis_counts[axis] += 1;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Calculate propwash severity score (0-100)
+        let propwash_avg_oscillation = if propwash_events > 0 {
+            propwash_oscillation_sum / propwash_events as f32
+        } else {
+            0.0
+        };
+
+        let propwash_worst_axis = propwash_axis_counts
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, count)| *count)
+            .map(|(i, _)| i)
+            .unwrap_or(0);
+
+        // Severity: events per minute * average oscillation amplitude, capped at 100
+        let events_per_minute = if flight_duration > 0.0 {
+            propwash_events as f32 / (flight_duration as f32 / 60.0)
+        } else {
+            0.0
+        };
+        let propwash_severity = (events_per_minute * propwash_avg_oscillation / 10.0).min(100.0);
+
+        // === LAG ANALYSIS ===
+        // Use cross-correlation to find delay between setpoint and gyro
+        let mut system_latency_ms = [0.0f32; 3];
+        if let (Some(setpoint), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
+            for axis in 0..3 {
+                let len = setpoint[axis].len().min(gyro[axis].len());
+                if len > 100 {
+                    // Simple lag estimation: find delay that minimizes RMS error
+                    let max_lag_samples = (sample_rate * 0.05) as usize; // Max 50ms
+                    let mut best_lag = 0;
+                    let mut best_correlation = f32::MIN;
+
+                    for lag in 0..max_lag_samples.min(len / 4) {
+                        let mut correlation = 0.0f32;
+                        let test_len = len - lag;
+                        for i in 0..test_len {
+                            correlation += setpoint[axis][i] * gyro[axis][i + lag];
+                        }
+                        if correlation > best_correlation {
+                            best_correlation = correlation;
+                            best_lag = lag;
+                        }
+                    }
+
+                    system_latency_ms[axis] =
+                        (best_lag as f32 / sample_rate as f32 * 1000.0) as f32;
+                }
+            }
+        }
+        let avg_latency_ms = system_latency_ms.iter().sum::<f32>() / 3.0;
+
+        // === I-TERM ANALYSIS ===
+        // Detect I-term windup (saturated I-term) and drift
+        let mut iterm_windup_events = 0usize;
+        let mut iterm_drift = [0.0f32; 3];
+
+        if let Some(i_terms) = fd.i() {
+            for axis in 0..3 {
+                if i_terms[axis].len() > 100 {
+                    // I-term windup: detect when I-term magnitude exceeds threshold
+                    let i_threshold = 400.0; // Typical max I-term contribution
+                    for val in i_terms[axis].iter() {
+                        if val.abs() > i_threshold {
+                            iterm_windup_events += 1;
+                        }
+                    }
+
+                    // I-term drift: compare first and last 10% of values
+                    let segment_len = i_terms[axis].len() / 10;
+                    if segment_len > 0 {
+                        let first_avg: f32 =
+                            i_terms[axis][..segment_len].iter().sum::<f32>() / segment_len as f32;
+                        let last_avg: f32 = i_terms[axis][i_terms[axis].len() - segment_len..]
+                            .iter()
+                            .sum::<f32>()
+                            / segment_len as f32;
+                        iterm_drift[axis] = last_avg - first_avg;
+                    }
+                }
+            }
+        }
+
+        // === MOTOR BALANCE ANALYSIS ===
+        // Analyze motor outputs to detect imbalance (CG issues, bent props, motor problems)
+        let mut motor_avg_output = [0.0f32; 4];
+        let mut motor_imbalance_pct = 0.0f32;
+        let mut motor_imbalance_pair = "None".to_string();
+        let mut motor_worst_idx = 0usize;
+        let mut motor_differential = 0.0f32;
+
+        if let Some(motors) = fd.motor() {
+            if motors.len() >= 4 && !motors[0].is_empty() {
+                // Calculate per-motor averages
+                for (i, motor_data) in motors.iter().enumerate().take(4) {
+                    if !motor_data.is_empty() {
+                        let sum: f32 = motor_data.iter().sum();
+                        motor_avg_output[i] = sum / motor_data.len() as f32;
+                    }
+                }
+
+                // Normalize to percentage (assuming 2000 max or 100 for normalized)
+                let max_scale = motor_avg_output.iter().cloned().fold(0.0f32, f32::max);
+                let scale_factor = if max_scale > 100.0 { 2000.0 } else { 100.0 };
+                for avg in motor_avg_output.iter_mut() {
+                    *avg = (*avg / scale_factor) * 100.0;
+                }
+
+                // Find min/max and differential
+                let max_motor = motor_avg_output.iter().cloned().fold(0.0f32, f32::max);
+                let min_motor = motor_avg_output.iter().cloned().fold(f32::MAX, f32::min);
+                motor_differential = max_motor - min_motor;
+
+                // Find worst (highest) motor
+                motor_worst_idx = motor_avg_output
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap())
+                    .map(|(i, _)| i)
+                    .unwrap_or(0);
+
+                // Calculate overall imbalance percentage
+                let avg_all = motor_avg_output.iter().sum::<f32>() / 4.0;
+                if avg_all > 1.0 {
+                    motor_imbalance_pct = (motor_differential / avg_all) * 100.0;
+                }
+
+                // Identify front-back vs left-right imbalance
+                // Standard quad motor order: 0=FR, 1=RR, 2=RL, 3=FL (or similar)
+                // Front-back: compare (M0+M3) vs (M1+M2)
+                // Left-right: compare (M2+M3) vs (M0+M1)
+                let front = motor_avg_output[0] + motor_avg_output[3];
+                let back = motor_avg_output[1] + motor_avg_output[2];
+                let left = motor_avg_output[2] + motor_avg_output[3];
+                let right = motor_avg_output[0] + motor_avg_output[1];
+
+                let fb_diff = (front - back).abs();
+                let lr_diff = (left - right).abs();
+
+                if fb_diff > lr_diff && fb_diff > 5.0 {
+                    motor_imbalance_pair = if front > back {
+                        "Nose Heavy (CG forward)".to_string()
+                    } else {
+                        "Tail Heavy (CG back)".to_string()
+                    };
+                } else if lr_diff > 5.0 {
+                    motor_imbalance_pair = if left > right {
+                        "Right Heavy (CG right)".to_string()
+                    } else {
+                        "Left Heavy (CG left)".to_string()
+                    };
+                }
+            }
+        }
+
+        // === FEEDFORWARD ANALYSIS ===
+        // Analyze how well feedforward anticipates stick inputs
+        let mut ff_effectiveness = 50.0f32; // Default: average
+        let mut setpoint_jitter = 0.0f32;
+        let mut max_stick_rate = [0.0f32; 3];
+        let mut ff_delay_compensation = 0.0f32;
+
+        if let Some(setpoint) = fd.setpoint() {
+            // Calculate setpoint derivative (stick rate) and jitter for each axis
+            for axis in 0..3 {
+                if setpoint[axis].len() > 10 {
+                    // Calculate stick rate (derivative of setpoint)
+                    let dt = 1.0 / sample_rate as f32;
+                    let mut stick_rates: Vec<f32> = Vec::new();
+
+                    for i in 1..setpoint[axis].len() {
+                        let rate = (setpoint[axis][i] - setpoint[axis][i - 1]) / dt;
+                        stick_rates.push(rate);
+                        if rate.abs() > max_stick_rate[axis] {
+                            max_stick_rate[axis] = rate.abs();
+                        }
+                    }
+
+                    // Jitter: high-frequency noise in setpoint (using simple variance of second derivative)
+                    if stick_rates.len() > 10 {
+                        let mean: f32 = stick_rates.iter().sum::<f32>() / stick_rates.len() as f32;
+                        let variance: f32 =
+                            stick_rates.iter().map(|r| (r - mean).powi(2)).sum::<f32>()
+                                / stick_rates.len() as f32;
+                        setpoint_jitter += variance.sqrt() / 100.0; // Normalize
+                    }
+                }
+            }
+            setpoint_jitter /= 3.0; // Average across axes
+
+            // FF effectiveness: compare leading edge of setpoint response
+            // If gyro starts moving before or with setpoint changes, FF is effective
+            if let Some(gyro) = fd.gyro_filtered() {
+                let mut effective_transitions = 0;
+                let mut total_transitions = 0;
+                let threshold = 50.0; // Deg/s threshold for detecting transitions
+
+                for axis in 0..3 {
+                    let len = setpoint[axis].len().min(gyro[axis].len());
+                    for i in 5..len.saturating_sub(5) {
+                        // Detect setpoint transitions
+                        let sp_change =
+                            (setpoint[axis][i] - setpoint[axis][i.saturating_sub(3)]).abs();
+                        if sp_change > threshold {
+                            total_transitions += 1;
+                            // Check if gyro is also changing (good FF anticipation)
+                            let gyro_change =
+                                (gyro[axis][i] - gyro[axis][i.saturating_sub(3)]).abs();
+                            if gyro_change > threshold * 0.5 {
+                                effective_transitions += 1;
+                            }
+                        }
+                    }
+                }
+
+                if total_transitions > 10 {
+                    ff_effectiveness =
+                        (effective_transitions as f32 / total_transitions as f32) * 100.0;
+                }
+            }
+
+            // Estimate delay compensation based on step response rise time
+            let avg_rise_time = (step_rise_time[0] + step_rise_time[1]) / 2.0;
+            ff_delay_compensation = if avg_rise_time > 0.0 {
+                avg_rise_time as f32 * 0.5
+            } else {
+                2.0
+            };
+        }
+
         Self {
             step_overshoot,
             step_undershoot,
@@ -391,6 +763,31 @@ impl AnalysisResults {
             avg_throttle_pct,
             throttle_variance,
             flight_duration,
+            // Throttle-segmented tracking
+            tracking_error_by_throttle,
+            worst_throttle_band,
+            // New propwash analysis
+            propwash_severity,
+            propwash_events,
+            propwash_worst_axis,
+            propwash_avg_oscillation,
+            // New lag analysis
+            system_latency_ms,
+            avg_latency_ms,
+            // New I-term analysis
+            iterm_windup_events,
+            iterm_drift,
+            // Motor balance analysis
+            motor_avg_output,
+            motor_imbalance_pct,
+            motor_imbalance_pair,
+            motor_worst_idx,
+            motor_differential,
+            // Feedforward analysis
+            ff_effectiveness,
+            setpoint_jitter,
+            max_stick_rate,
+            ff_delay_compensation,
         }
     }
 }
@@ -716,15 +1113,204 @@ impl SuggestionsTab {
             });
         }
 
-        // === PROPWASH INDICATION ===
-        // Propwash tends to show as oscillation + high D noise together
-        if analysis.step_oscillations.iter().any(|&o| o) && max_dterm_noise > 60.0 {
+        // === MOTOR BALANCE ANALYSIS ===
+        if analysis.motor_imbalance_pct > 5.0 {
+            let motor_names = ["FR (1)", "RR (2)", "RL (3)", "FL (4)"];
+            let worst_motor_name = motor_names[analysis.motor_worst_idx];
+
+            let (severity, severity_text) = if analysis.motor_imbalance_pct > 20.0 {
+                (Severity::Critical, "SEVERE")
+            } else if analysis.motor_imbalance_pct > 10.0 {
+                (Severity::Warning, "MODERATE")
+            } else {
+                (Severity::Info, "MILD")
+            };
+
+            suggestions.push(TuningSuggestion {
+                category: "Motors".to_string(),
+                title: format!("{} motor imbalance detected ({:.1}%)", severity_text, analysis.motor_imbalance_pct),
+                description: format!(
+                    "Motor outputs: M1={:.1}%, M2={:.1}%, M3={:.1}%, M4={:.1}%. {} is working hardest. Diagnosis: {}",
+                    analysis.motor_avg_output[0],
+                    analysis.motor_avg_output[1],
+                    analysis.motor_avg_output[2],
+                    analysis.motor_avg_output[3],
+                    worst_motor_name,
+                    analysis.motor_imbalance_pair
+                ),
+                recommendation: if analysis.motor_imbalance_pct > 20.0 {
+                    format!(
+                        "Significant CG or mechanical issue. Check: 1) {} prop for damage/balance, 2) Adjust battery position ({}), 3) Check motor bearings on {}", 
+                        worst_motor_name,
+                        analysis.motor_imbalance_pair,
+                        worst_motor_name
+                    )
+                } else if analysis.motor_imbalance_pct > 10.0 {
+                    format!(
+                        "Moderate imbalance suggesting {}. Adjust battery position or check prop balance on motor {}.",
+                        analysis.motor_imbalance_pair,
+                        analysis.motor_worst_idx + 1
+                    )
+                } else {
+                    "Minor imbalance - likely acceptable. Fine-tune battery position if needed.".to_string()
+                },
+                cli_command: None, // No CLI fix - physical adjustment needed
+                severity,
+            });
+        }
+
+        // === FEEDFORWARD ANALYSIS ===
+        if analysis.ff_effectiveness < 50.0 && analysis.max_stick_rate.iter().any(|&r| r > 500.0) {
+            let (severity, severity_text) = if analysis.ff_effectiveness < 30.0 {
+                (Severity::Warning, "POOR")
+            } else {
+                (Severity::Info, "SUBOPTIMAL")
+            };
+
+            suggestions.push(TuningSuggestion {
+                category: "Feedforward".to_string(),
+                title: format!("{} FF tracking (Score: {:.0}/100)", severity_text, analysis.ff_effectiveness),
+                description: format!(
+                    "Gyro is lagging behind setpoint during fast moves. FF Effectiveness: {:.0}%. Avg Stick Rate: {:.0}deg/s.",
+                    analysis.ff_effectiveness,
+                    analysis.max_stick_rate.iter().sum::<f32>() / 3.0
+                ),
+                recommendation: "Feedforward gain is likely too low. 1) Increase FF gain by 15-20%. 2) Increase FF transition if moves feel jumpy.".to_string(),
+                cli_command: None,
+                severity,
+            });
+        }
+
+        if analysis.setpoint_jitter > 10.0 {
+            suggestions.push(TuningSuggestion {
+                category: "RC Link / Feedforward".to_string(),
+                title: "High Setpoint Jitter Detected".to_string(),
+                description: format!(
+                    "RC smoothing may be insufficient or radio link noisy. Jitter score: {:.1} (Normal < 5.0).",
+                    analysis.setpoint_jitter
+                ),
+                recommendation: "High RC jitter causes hot motors and noise. 1) Increase RC Smoothing values. 2) Check radio link quality.".to_string(),
+                cli_command: Some("set rc_smoothing_auto_factor = 40\nset rc_smoothing_setpoint_rate = 0".to_string()),
+                severity: Severity::Warning,
+            });
+        }
+
+        // === THROTTLE-BAND PERFORMANCE ANALYSIS ===
+        // Suggest if tracking varies significantly across throttle ranges
+        let throttle_band_names = ["Low (<30%)", "Mid (30-70%)", "High (>70%)"];
+        let worst_band_name = throttle_band_names[analysis.worst_throttle_band];
+
+        // Calculate average error per band
+        let avg_error_low = (analysis.tracking_error_by_throttle[0][0]
+            + analysis.tracking_error_by_throttle[1][0]
+            + analysis.tracking_error_by_throttle[2][0])
+            / 3.0;
+        let avg_error_mid = (analysis.tracking_error_by_throttle[0][1]
+            + analysis.tracking_error_by_throttle[1][1]
+            + analysis.tracking_error_by_throttle[2][1])
+            / 3.0;
+        let avg_error_high = (analysis.tracking_error_by_throttle[0][2]
+            + analysis.tracking_error_by_throttle[1][2]
+            + analysis.tracking_error_by_throttle[2][2])
+            / 3.0;
+
+        let max_error = avg_error_low.max(avg_error_mid).max(avg_error_high);
+        let min_error = avg_error_low.min(avg_error_mid).min(avg_error_high);
+        let error_variance = if min_error > 0.0 {
+            (max_error - min_error) / min_error * 100.0
+        } else {
+            0.0
+        };
+
+        if error_variance > 30.0 && max_error > 10.0 {
+            let (severity, severity_text) = if error_variance > 80.0 {
+                (Severity::Warning, "SIGNIFICANT")
+            } else {
+                (Severity::Info, "MODERATE")
+            };
+
+            suggestions.push(TuningSuggestion {
+                category: "Throttle Performance".to_string(),
+                title: format!("{} tracking variation across throttle ({:.0}% difference)", severity_text, error_variance),
+                description: format!(
+                    "Tracking error varies by throttle: Low={:.1}°/s, Mid={:.1}°/s, High={:.1}°/s. Worst at {} throttle.",
+                    avg_error_low, avg_error_mid, avg_error_high, worst_band_name
+                ),
+                recommendation: match analysis.worst_throttle_band {
+                    0 => "Poor tracking at low throttle suggests need for higher Antigravity gain or I-term tuning. Try: set anti_gravity_gain = 100".to_string(),
+                    2 => "Poor tracking at high throttle suggests TPA is too aggressive or motors saturating. Try: set tpa_rate = 50".to_string(),
+                    _ => "Inconsistent mid-throttle tracking. Check filter settings and D-gain for resonance issues.".to_string(),
+                },
+                cli_command: match analysis.worst_throttle_band {
+                    0 => Some("set anti_gravity_gain = 100".to_string()),
+                    2 => Some("set tpa_rate = 50\nset tpa_breakpoint = 1350".to_string()),
+                    _ => None,
+                },
+                severity,
+            });
+        }
+
+        // === ENHANCED PROPWASH ANALYSIS ===
+
+        let axis_names_lower = ["roll", "pitch", "yaw"];
+
+        if analysis.propwash_severity > 0.0 {
+            let worst_axis_name = axis_names[analysis.propwash_worst_axis];
+
+            // Determine severity level based on score
+            let (severity, severity_text) = if analysis.propwash_severity > 60.0 {
+                (Severity::Critical, "SEVERE")
+            } else if analysis.propwash_severity > 30.0 {
+                (Severity::Warning, "MODERATE")
+            } else {
+                (Severity::Info, "MILD")
+            };
+
             suggestions.push(TuningSuggestion {
                 category: "Propwash".to_string(),
-                title: "Possible propwash oscillation".to_string(),
-                description:
-                    "Oscillations detected with high D-term noise. Classic propwash signature."
-                        .to_string(),
+                title: format!("{} propwash detected ({} events)", severity_text, analysis.propwash_events),
+                description: format!(
+                    "Propwash severity: {:.0}/100. {} axis most affected. Avg oscillation: {:.1}°/s during events.",
+                    analysis.propwash_severity,
+                    worst_axis_name,
+                    analysis.propwash_avg_oscillation
+                ),
+                recommendation: if analysis.propwash_severity > 60.0 {
+                    format!(
+                        "Critical propwash on {} axis. Try: 1) Enable RPM filter if not already, 2) Increase D-gain by 15-20%, 3) Enable Dynamic Idle, 4) Check for bent props.",
+                        worst_axis_name
+                    )
+                } else if analysis.propwash_severity > 30.0 {
+                    format!(
+                        "Moderate propwash on {} axis. Try: 1) Raise {} D-gain slightly, 2) Enable/tune Dynamic Idle (dyn_idle_min_rpm = 30), 3) Increase feedforward smoothing.",
+                        worst_axis_name, axis_names_lower[analysis.propwash_worst_axis]
+                    )
+                } else {
+                    "Mild propwash - may be acceptable. Fine-tune D-gain if desired.".to_string()
+                },
+                cli_command: if analysis.propwash_severity > 30.0 {
+                    Some(format!(
+                        "set {}_d = {}\nset dyn_idle_min_rpm = 30\nset feedforward_smooth_factor = 25",
+                        axis_names_lower[analysis.propwash_worst_axis],
+                        (d_gains[analysis.propwash_worst_axis] * 1.15) as i32
+                    ))
+                } else {
+                    None
+                },
+                severity,
+            });
+        }
+
+        // Fallback: also check traditional propwash signature
+        if analysis.propwash_events == 0
+            && analysis.step_oscillations.iter().any(|&o| o)
+            && max_dterm_noise > 60.0
+        {
+            suggestions.push(TuningSuggestion {
+                category: "Propwash".to_string(),
+                title: "Possible propwash oscillation (indirect)".to_string(),
+                description: "Oscillations detected with high D-term noise. May indicate propwash."
+                    .to_string(),
                 recommendation:
                     "Try: lower D, raise D-min, enable anti_gravity, use feedforward smoothing."
                         .to_string(),
@@ -732,6 +1318,93 @@ impl SuggestionsTab {
                     "set feedforward_smooth_factor = 25\nset feedforward_jitter_factor = 10"
                         .to_string(),
                 ),
+                severity: Severity::Info,
+            });
+        }
+
+        // === SYSTEM LATENCY ANALYSIS ===
+        if analysis.avg_latency_ms > 5.0 {
+            let slowest_axis = analysis
+                .system_latency_ms
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+
+            let severity = if analysis.avg_latency_ms > 15.0 {
+                Severity::Warning
+            } else {
+                Severity::Info
+            };
+
+            suggestions.push(TuningSuggestion {
+                category: "Latency".to_string(),
+                title: format!("System latency: {:.1}ms average", analysis.avg_latency_ms),
+                description: format!(
+                    "Per-axis latency: Roll {:.1}ms, Pitch {:.1}ms, Yaw {:.1}ms. {} axis is slowest.",
+                    analysis.system_latency_ms[0],
+                    analysis.system_latency_ms[1],
+                    analysis.system_latency_ms[2],
+                    axis_names[slowest_axis]
+                ),
+                recommendation: if analysis.avg_latency_ms > 15.0 {
+                    "High latency detected. Check: 1) Raise gyro/D-term LPF frequencies if noise permits, 2) Reduce dynamic notch count, 3) Ensure RPM filter is working."
+                } else {
+                    "Moderate latency. Consider raising filter cutoffs if you want snappier response."
+                }.to_string(),
+                cli_command: None,
+                severity,
+            });
+        }
+
+        // === I-TERM ANALYSIS ===
+        if analysis.iterm_windup_events > 50 {
+            suggestions.push(TuningSuggestion {
+                category: "I-Term".to_string(),
+                title: format!("I-term windup detected ({} events)", analysis.iterm_windup_events),
+                description: "I-term is saturating during sustained maneuvers. This can cause delayed recovery.".to_string(),
+                recommendation: "Lower I-term limit or reduce I-gain. Consider enabling iterm_relax for aggressive flying.".to_string(),
+                cli_command: Some("set iterm_relax = RP\nset iterm_relax_type = SETPOINT".to_string()),
+                severity: if analysis.iterm_windup_events > 200 {
+                    Severity::Warning
+                } else {
+                    Severity::Info
+                },
+            });
+        }
+
+        // Check for I-term drift (mechanical issue indicator)
+        let max_drift = analysis
+            .iterm_drift
+            .iter()
+            .map(|d| d.abs())
+            .fold(0.0f32, f32::max);
+        if max_drift > 50.0 {
+            let drift_axis = analysis
+                .iterm_drift
+                .iter()
+                .enumerate()
+                .max_by(|(_, a), (_, b)| {
+                    a.abs()
+                        .partial_cmp(&b.abs())
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .map(|(i, _)| i)
+                .unwrap_or(0);
+
+            suggestions.push(TuningSuggestion {
+                category: "I-Term".to_string(),
+                title: format!("I-term drift on {} axis", axis_names[drift_axis]),
+                description: format!(
+                    "I-term drifted by {:.0} during flight. This often indicates a mechanical issue (unbalanced props, bent motor shaft).",
+                    analysis.iterm_drift[drift_axis]
+                ),
+                recommendation: format!(
+                    "Check {} axis for: 1) Unbalanced or damaged prop, 2) Loose motor mount, 3) Bent motor shaft, 4) CG offset.",
+                    axis_names[drift_axis]
+                ),
+                cli_command: None,
                 severity: Severity::Warning,
             });
         }
@@ -1258,7 +1931,10 @@ impl SuggestionsTab {
                             let api_key = self.api_key.clone();
 
                             // Track AI analysis started
-                            analytics::log_ai_analysis_started(&model_id, &format!("{}", self.analysis_focus));
+                            analytics::log_ai_analysis_started(
+                                &model_id,
+                                &format!("{}", self.analysis_focus),
+                            );
 
                             // Start async analysis
                             self.ai_loading = true;
@@ -1362,6 +2038,52 @@ impl SuggestionsTab {
             ui.separator();
             ui.add_space(8.0);
 
+            // === QUICK ACTIONS PANEL ===
+            ui.label(RichText::new("🚦 Quick Tuning Status").strong().size(16.0));
+            ui.add_space(4.0);
+
+            // Calculate status for each tuning area
+            let p_status = self.get_category_status("P-Gain");
+            let d_status = self.get_category_status("D-Gain");
+            let filter_status = self.get_combined_status(&["Filtering", "Noise"]);
+            let propwash_status = self.get_category_status("Propwash");
+            let latency_status = self.get_category_status("Latency");
+            let iterm_status = self.get_category_status("I-Term");
+            let motor_status = self.get_category_status("Motors");
+
+            egui::Frame::none()
+                .fill(egui::Color32::from_black_alpha(40))
+                .rounding(6.0)
+                .inner_margin(12.0)
+                .show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        self.draw_status_indicator(ui, "P-Gain", &p_status);
+                        ui.add_space(16.0);
+                        self.draw_status_indicator(ui, "D-Gain", &d_status);
+                        ui.add_space(16.0);
+                        self.draw_status_indicator(ui, "Filters", &filter_status);
+                        ui.add_space(16.0);
+                        self.draw_status_indicator(ui, "Propwash", &propwash_status);
+                        ui.add_space(16.0);
+                        self.draw_status_indicator(ui, "Latency", &latency_status);
+                        ui.add_space(16.0);
+                        self.draw_status_indicator(ui, "I-Term", &iterm_status);
+                        ui.add_space(16.0);
+                        self.draw_status_indicator(ui, "Motors", &motor_status);
+                    });
+                });
+
+            ui.add_space(4.0);
+            ui.label(
+                RichText::new("🟢 = Good  🟡 = Needs Attention  🔴 = Critical")
+                    .weak()
+                    .small(),
+            );
+
+            ui.add_space(16.0);
+            ui.separator();
+            ui.add_space(8.0);
+
             // === RULE-BASED SUGGESTIONS ===
             ui.label(RichText::new("📋 Automated Analysis").strong().size(16.0));
             ui.label("Based on analysis of your flight log, here are tuning recommendations:");
@@ -1377,7 +2099,11 @@ impl SuggestionsTab {
                 {
                     let all_commands = self.generate_cli_export();
                     if !all_commands.is_empty() {
-                        let cmd_count = self.suggestions.iter().filter(|s| s.cli_command.is_some()).count();
+                        let cmd_count = self
+                            .suggestions
+                            .iter()
+                            .filter(|s| s.cli_command.is_some())
+                            .count();
                         analytics::log_cli_commands_copied(cmd_count, None);
                         ui.output_mut(|o| o.copied_text = all_commands);
                     }
@@ -1787,6 +2513,22 @@ impl SuggestionsTab {
 
             // Analysis focus
             analysis_focus: self.analysis_focus,
+
+            // === NEW ANALYSIS METRICS ===
+
+            // Propwash analysis
+            propwash_severity: self.analysis.propwash_severity,
+            propwash_events: self.analysis.propwash_events,
+            propwash_worst_axis: ["Roll", "Pitch", "Yaw"][self.analysis.propwash_worst_axis]
+                .to_string(),
+
+            // System latency
+            system_latency_ms: self.analysis.system_latency_ms,
+            avg_latency_ms: self.analysis.avg_latency_ms,
+
+            // I-term analysis
+            iterm_windup_events: self.analysis.iterm_windup_events,
+            iterm_drift: self.analysis.iterm_drift,
         }
     }
 
@@ -1850,5 +2592,64 @@ impl SuggestionsTab {
         }
 
         output
+    }
+
+    /// Get status (severity) for a category based on suggestions
+    fn get_category_status(&self, category: &str) -> Severity {
+        let matching: Vec<&TuningSuggestion> = self
+            .suggestions
+            .iter()
+            .filter(|s| s.category.to_lowercase().contains(&category.to_lowercase()))
+            .collect();
+
+        if matching.iter().any(|s| s.severity == Severity::Critical) {
+            Severity::Critical
+        } else if matching.iter().any(|s| s.severity == Severity::Warning) {
+            Severity::Warning
+        } else if matching.is_empty() {
+            Severity::Info // Green = no issues
+        } else {
+            Severity::Info
+        }
+    }
+
+    /// Get combined status for multiple categories
+    fn get_combined_status(&self, categories: &[&str]) -> Severity {
+        let mut worst = Severity::Info;
+        for cat in categories {
+            let status = self.get_category_status(cat);
+            if status == Severity::Critical {
+                return Severity::Critical;
+            } else if status == Severity::Warning {
+                worst = Severity::Warning;
+            }
+        }
+        worst
+    }
+
+    /// Draw a traffic light status indicator
+    fn draw_status_indicator(&self, ui: &mut egui::Ui, label: &str, status: &Severity) {
+        let (icon, color, tooltip) = match status {
+            Severity::Critical => (
+                "🔴",
+                egui::Color32::from_rgb(255, 80, 80),
+                "Critical issues found",
+            ),
+            Severity::Warning => (
+                "🟡",
+                egui::Color32::from_rgb(255, 200, 80),
+                "Needs attention",
+            ),
+            Severity::Info => ("🟢", egui::Color32::from_rgb(80, 255, 80), "Looking good"),
+        };
+
+        let response = ui
+            .horizontal(|ui| {
+                ui.label(icon);
+                ui.label(RichText::new(label).color(color).strong());
+            })
+            .response;
+
+        response.on_hover_text(tooltip);
     }
 }

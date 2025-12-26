@@ -93,12 +93,124 @@ impl SetupTab {
             ui.add(egui::Button::new("Rateprofile 1 ▼").min_size(Vec2::new(100.0, 20.0)));
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if ui
+                    .button("📋 Export CLI")
+                    .on_hover_text("Copy current tune as Betaflight CLI commands")
+                    .clicked()
+                {
+                    let dump = self.generate_cli_dump();
+                    ui.output_mut(|o| o.copied_text = dump);
+                }
                 if ui.button("Show all PIDs").clicked() {}
-                if ui.button("Reset this Profile").clicked() {}
-                if ui.button("Copy rateprofile").clicked() {}
-                if ui.button("Copy profile").clicked() {}
+                // if ui.button("Reset this Profile").clicked() {} // Disabled placeholder
+                // if ui.button("Copy rateprofile").clicked() {} // Disabled placeholder
             });
         });
+    }
+
+    fn generate_cli_dump(&self) -> String {
+        let headers = &self.fd.unknown_headers;
+        let mut out = String::new();
+
+        out.push_str("# PID-Lab Tune Export\n");
+        if let Some(craft) = &self.fd.craft_name {
+            out.push_str(&format!("# Craft: {}\n", craft));
+        }
+        out.push_str("\n# Master Analysis\n");
+        // Profile ID (usually 1 if from log, hard to know actual profile index, assuming current)
+
+        // PIDs
+        for (axis_name, pid_key) in [
+            ("roll", "rollPID"),
+            ("pitch", "pitchPID"),
+            ("yaw", "yawPID"),
+        ] {
+            if let Some(val) = headers.get(pid_key) {
+                let parts: Vec<&str> = val.split(',').collect();
+                if parts.len() >= 3 {
+                    out.push_str(&format!("set p_{} = {}\n", axis_name, parts[0]));
+                    out.push_str(&format!("set i_{} = {}\n", axis_name, parts[1]));
+                    out.push_str(&format!("set d_{} = {}\n", axis_name, parts[2]));
+                    if parts.len() > 3 {
+                        out.push_str(&format!("set f_{} = {}\n", axis_name, parts[3]));
+                    }
+                }
+            }
+        }
+
+        // Feedforward
+        if let Some(ff) = headers.get("ff_weight") {
+            let parts: Vec<&str> = ff.split(',').collect();
+            if parts.len() >= 3 {
+                out.push_str(&format!("set feedforward_roll = {}\n", parts[0]));
+                out.push_str(&format!("set feedforward_pitch = {}\n", parts[1]));
+                out.push_str(&format!("set feedforward_yaw = {}\n", parts[2]));
+            }
+        }
+
+        // D Min
+        if let Some(d_min) = headers.get("d_min") {
+            let parts: Vec<&str> = d_min.split(',').collect();
+            if parts.len() >= 3 {
+                out.push_str(&format!("set d_min_roll = {}\n", parts[0]));
+                out.push_str(&format!("set d_min_pitch = {}\n", parts[1]));
+                out.push_str(&format!("set d_min_yaw = {}\n", parts[2]));
+            }
+        }
+
+        // Dynamics
+        let simple_mappings = [
+            ("feedforward_jitter_factor", "feedforward_jitter_factor"),
+            ("feedforward_smooth_factor", "feedforward_smooth_factor"),
+            ("feedforward_boost", "feedforward_boost"),
+            ("feedforward_max_rate_limit", "feedforward_max_rate_limit"),
+            ("feedforward_transition", "feedforward_transition"),
+            ("d_max_gain", "d_max_gain"),
+            ("d_max_advance", "d_max_advance"),
+            ("tpa_rate", "tpa_rate"),
+            ("tpa_breakpoint", "tpa_breakpoint"),
+            ("anti_gravity_gain", "anti_gravity_gain"),
+            ("thrust_linear", "thrust_linear"),
+            ("vbat_sag_compensation", "vbat_sag_compensation"),
+            ("dyn_idle_min_rpm", "dyn_idle_min_rpm"),
+        ];
+
+        out.push_str("\n# Dynamics\n");
+        for (header_key, cli_key) in simple_mappings {
+            if let Some(val) = headers.get(header_key) {
+                out.push_str(&format!("set {} = {}\n", cli_key, val));
+            }
+        }
+
+        // Rates
+        out.push_str("\n# Rates\n");
+        if let Some(rtype) = headers.get("rates_type") {
+            // Rates type mapping might be needed if strings differ
+            // Usually logs use "ACTUAL", "BETAFLIGHT", etc.
+            // CLI expects specific ID or string. Assuming string works for now or user checks.
+            // Actually CLI needs Integers? rates_type 0=Betaflight, 1=Raceflight, 2=Kiss, 3=Actual, 4=Quick
+            // Headers string might be "Actual".
+            // Let's output it as comment if unsure, or try to map.
+            // Usually headers.rates_type is string "Actual" or "Betaflight".
+            // We'll skip setting type to avoid breakage, just set the values.
+            out.push_str(&format!("# Rates Type: {}\n", rtype));
+        }
+
+        for axis in ["roll", "pitch", "yaw"] {
+            if let Some(rc) = headers.get(&format!("{}_rc_rate", axis)) {
+                out.push_str(&format!("set {}_rc_rate = {}\n", axis, rc));
+            }
+            if let Some(rate) = headers.get(&format!("{}_srate", axis)) {
+                // srate is Super Rate
+                out.push_str(&format!("set {}_srate = {}\n", axis, rate));
+            }
+            if let Some(expo) = headers.get(&format!("{}_expo", axis)) {
+                out.push_str(&format!("set {}_expo = {}\n", axis, expo));
+            }
+        }
+
+        out.push_str("\nsave\n");
+        out
     }
 
     fn show_sub_tab_selector(&mut self, ui: &mut egui::Ui) {

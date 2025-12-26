@@ -128,6 +128,8 @@ pub struct FlightView {
     filter_tab: FilterTab,
     anomalies_tab: AnomaliesTab,
     logs_tab: LogsTab,
+    feedforward_tab: FeedforwardTab,
+    tuning_guide_tab: TuningGuideTab,
 }
 
 impl FlightView {
@@ -146,8 +148,10 @@ impl FlightView {
             setup_tab: SetupTab::new(data.clone()),
             suggestions_tab: SuggestionsTab::new(data.clone()),
             filter_tab: FilterTab::new(data.clone()),
-            anomalies_tab: AnomaliesTab::new(data),
+            anomalies_tab: AnomaliesTab::new(data.clone()),
             logs_tab: LogsTab::new(),
+            feedforward_tab: FeedforwardTab::new(data),
+            tuning_guide_tab: TuningGuideTab::new(),
             plot_group: TimeseriesGroup::new("timeseries_plots", false),
         }
     }
@@ -196,6 +200,8 @@ impl FlightView {
                 nav_action = self.anomalies_tab.show(ui);
             }
             FlightViewTab::Logs => self.logs_tab.show(ui),
+            FlightViewTab::Feedforward => self.feedforward_tab.show(ui),
+            FlightViewTab::TuningGuide => self.tuning_guide_tab.show(ui),
         });
 
         nav_action

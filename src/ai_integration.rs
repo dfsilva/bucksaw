@@ -310,6 +310,21 @@ pub struct FlightMetrics {
 
     /// Analysis focus for AI recommendations
     pub analysis_focus: AnalysisFocus,
+
+    // === NEW ANALYSIS METRICS ===
+
+    // Propwash analysis
+    pub propwash_severity: f32,      // 0-100 score
+    pub propwash_events: usize,      // Number of detected events
+    pub propwash_worst_axis: String, // "Roll", "Pitch", or "Yaw"
+
+    // System latency
+    pub system_latency_ms: [f32; 3], // Per-axis latency
+    pub avg_latency_ms: f32,         // Average latency
+
+    // I-term analysis
+    pub iterm_windup_events: usize, // Count of saturation events
+    pub iterm_drift: [f32; 3],      // Drift per axis
 }
 
 impl FlightMetrics {
@@ -576,6 +591,19 @@ Feedforward (FF) provides instantaneous stick response.
 ## Motor Performance
 - Saturation: {:.1}% of flight time (>10% indicates need for lower authority)
 
+## Propwash Analysis
+- Severity Score: {:.0}/100
+- Detected Events: {}
+- Worst Affected Axis: {}
+
+## System Latency
+- Average Latency: {:.1}ms
+- Per-Axis: Roll={:.1}ms, Pitch={:.1}ms, Yaw={:.1}ms
+
+## I-Term Health
+- Windup Events: {}
+- Drift: Roll={:.1}, Pitch={:.1}, Yaw={:.1}
+
 {}
 {}
 
@@ -585,7 +613,9 @@ Please provide:
 3. D-gain, D-max, and Feedforward recommendations based on the controller settings
 4. Filter recommendations if noise is high
 5. TPA and Anti-Gravity recommendations based on current settings
-6. Any other observations or warnings about the current tune
+6. Propwash-specific recommendations if severity is high
+7. Latency optimization suggestions if system latency is high
+8. Any other observations or warnings about the current tune
 
 REMINDER: Only use CLI commands that exist in {}."#,
             // Roll
@@ -627,6 +657,20 @@ REMINDER: Only use CLI commands that exist in {}."#,
             self.tracking_error_rms[2],
             // Motors
             self.motor_saturation_pct,
+            // Propwash
+            self.propwash_severity,
+            self.propwash_events,
+            self.propwash_worst_axis,
+            // Latency
+            self.avg_latency_ms,
+            self.system_latency_ms[0],
+            self.system_latency_ms[1],
+            self.system_latency_ms[2],
+            // I-term
+            self.iterm_windup_events,
+            self.iterm_drift[0],
+            self.iterm_drift[1],
+            self.iterm_drift[2],
             // Filters & Rates
             filter_section,
             rate_section,
