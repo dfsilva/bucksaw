@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Vec2};
+use egui_phosphor::regular as icons;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 
 use crate::flight_data::FlightData;
@@ -82,28 +83,35 @@ impl SetupTab {
 
             ui.add_space(20.0);
 
-            // Profile selector
+            // Profile indicator (read-only - log files contain only one profile)
             Self::styled_label(ui, "Profile");
-            ui.add(egui::Button::new("Profile 1 ▼").min_size(Vec2::new(80.0, 20.0)));
+            ui.label(
+                RichText::new("Profile 1")
+                    .color(betaflight_colors::ACCENT_ORANGE)
+            ).on_hover_text("Log files contain data from a single PID profile");
 
             ui.add_space(10.0);
 
-            // Rateprofile selector
+            // Rateprofile indicator (read-only)
             Self::styled_label(ui, "Rateprofile");
-            ui.add(egui::Button::new("Rateprofile 1 ▼").min_size(Vec2::new(100.0, 20.0)));
+            ui.label(
+                RichText::new("Rateprofile 1")
+                    .color(betaflight_colors::ACCENT_ORANGE)
+            ).on_hover_text("Log files contain data from a single rate profile");
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if ui
-                    .button("⎘ Export CLI")
+                    .button(format!("{} Export CLI", icons::CLIPBOARD))
                     .on_hover_text("Copy current tune as Betaflight CLI commands")
                     .clicked()
                 {
                     let dump = self.generate_cli_dump();
                     ui.output_mut(|o| o.copied_text = dump);
                 }
-                if ui.button("Show all PIDs").clicked() {}
-                // if ui.button("Reset this Profile").clicked() {} // Disabled placeholder
-                // if ui.button("Copy rateprofile").clicked() {} // Disabled placeholder
+                if ui.button(format!("{} Show all PIDs", icons::LIST))
+                    .on_hover_text("Display all PID values in a single view")
+                    .clicked() 
+                {}
             });
         });
     }

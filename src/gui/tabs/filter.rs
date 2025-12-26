@@ -1,6 +1,7 @@
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Stroke};
+use egui_phosphor::regular as icons;
 use egui_plot::{Corner, Legend, Line, Plot, PlotPoints, VLine};
 
 use crate::flight_data::FlightData;
@@ -1114,7 +1115,7 @@ impl FilterTab {
             // Good configuration check
             if recommendations.is_empty() {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("✓").size(16.0));
+                    ui.label(RichText::new(icons::CHECK_CIRCLE).size(16.0).color(Color32::from_rgb(0x83, 0xa5, 0x98)));
                     ui.label("Filter configuration looks good! No major issues detected.");
                 });
             } else {

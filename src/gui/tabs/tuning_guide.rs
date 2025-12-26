@@ -82,14 +82,14 @@ impl TuningGuideTab {
 
         // Navigation
         ui.horizontal(|ui| {
-            if ui.button("⬅ Previous").clicked() && self.current_step > 0 {
+            if ui.button(format!("{} Previous", icons::ARROW_LEFT)).clicked() && self.current_step > 0 {
                 self.current_step -= 1;
             }
             ui.label(
                 RichText::new(format!("Step {} of {}", self.current_step + 1, STEPS.len()))
                     .strong(),
             );
-            if ui.button("Next →").clicked() && self.current_step < STEPS.len() - 1 {
+            if ui.button(format!("Next {}", icons::ARROW_RIGHT)).clicked() && self.current_step < STEPS.len() - 1 {
                 self.current_step += 1;
             }
         });

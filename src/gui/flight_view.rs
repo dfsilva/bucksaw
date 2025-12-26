@@ -164,7 +164,7 @@ impl FlightView {
     }
 
     /// Returns an optional NavigationAction if the user requested navigation
-    /// (e.g., jumping to a specific time from the Anomalies tab)
+    /// (e.g., jumping to a specific time from the Anomalies tab, or clicking a dashboard card)
     pub fn show(&mut self, ui: &mut egui::Ui, tab: FlightViewTab) -> Option<NavigationAction> {
         let mut nav_action = None;
 
@@ -184,7 +184,18 @@ impl FlightView {
         }
 
         ui.vertical(|ui| match tab {
-            FlightViewTab::Dashboard => self.dashboard_tab.show(ui),
+            FlightViewTab::Dashboard => {
+                let card_target = self.dashboard_tab.show(ui);
+                // Convert dashboard card clicks to navigation actions
+                nav_action = match card_target {
+                    DashboardCardTarget::Vibe => Some(NavigationAction::to_tab(FlightViewTab::Vibe)),
+                    DashboardCardTarget::Error => Some(NavigationAction::to_tab(FlightViewTab::Error)),
+                    DashboardCardTarget::Stats => Some(NavigationAction::to_tab(FlightViewTab::Stats)),
+                    DashboardCardTarget::Filter => Some(NavigationAction::to_tab(FlightViewTab::Filter)),
+                    DashboardCardTarget::Anomalies => Some(NavigationAction::to_tab(FlightViewTab::Anomalies)),
+                    DashboardCardTarget::None => None,
+                };
+            }
             FlightViewTab::Plot => {
                 egui::ScrollArea::vertical()
                     .show(ui, |ui| self.plot_tab.show(ui, &mut self.plot_group));

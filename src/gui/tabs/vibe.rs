@@ -1,13 +1,15 @@
+use std::collections::HashMap;
 use std::f32::consts::PI;
 use std::sync::mpsc::{channel, Receiver, TryRecvError};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
+
+use realfft::RealToComplex;
 
 use egui::Color32;
 use egui_phosphor::regular as icons;
 use itertools::Itertools;
 
 use crate::flight_data::FlightData;
-use crate::gui::flex::*;
 use crate::iter::IterExt;
 use crate::utils::execute_in_background;
 
@@ -374,12 +376,27 @@ impl FftChunk {
         }).collect()
     }
 
+    /// Get a cached FFT planner for the given size
+    /// FFT planners are expensive to create, so we cache them per size
+    fn cached_fft_planner(size: usize) -> Arc<dyn RealToComplex<f32>> {
+        static PLANNERS: OnceLock<Mutex<HashMap<usize, Arc<dyn RealToComplex<f32>>>>> = OnceLock::new();
+        let planners = PLANNERS.get_or_init(|| Mutex::new(HashMap::new()));
+        let mut guard = planners.lock().unwrap();
+        guard
+            .entry(size)
+            .or_insert_with(|| {
+                Arc::from(realfft::RealFftPlanner::<f32>::new().plan_fft_forward(size))
+            })
+            .clone()
+    }
+
     pub fn calculate(time: f64, data: &[f32], throttle: f32) -> Self {
         // Convert to complex and apply hamming window
         let window = Self::hamming_window(data.len());
         let mut input: Vec<_> = data.iter().zip(window.iter()).map(|(d, w)| d * w).collect();
 
-        let planner = realfft::RealFftPlanner::<f32>::new().plan_fft_forward(data.len());
+        // Use cached planner for performance
+        let planner = Self::cached_fft_planner(data.len());
         let mut output = planner.make_output_vec();
         planner.process(&mut input, &mut output).unwrap();
 

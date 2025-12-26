@@ -535,25 +535,36 @@ impl AnalysisResults {
         let propwash_severity = (events_per_minute * propwash_avg_oscillation / 10.0).min(100.0);
 
         // === LAG ANALYSIS ===
-        // Use cross-correlation to find delay between setpoint and gyro
+        // Use normalized cross-correlation to find delay between setpoint and gyro
         let mut system_latency_ms = [0.0f32; 3];
         if let (Some(setpoint), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
             for axis in 0..3 {
                 let len = setpoint[axis].len().min(gyro[axis].len());
                 if len > 100 {
-                    // Simple lag estimation: find delay that minimizes RMS error
+                    // Normalized cross-correlation for amplitude-independent lag estimation
                     let max_lag_samples = (sample_rate * 0.05) as usize; // Max 50ms
                     let mut best_lag = 0;
                     let mut best_correlation = f32::MIN;
 
+                    // Pre-compute setpoint energy for normalization
+                    let setpoint_energy: f32 = setpoint[axis].iter().map(|x| x * x).sum();
+
                     for lag in 0..max_lag_samples.min(len / 4) {
-                        let mut correlation = 0.0f32;
                         let test_len = len - lag;
+                        let mut correlation = 0.0f32;
+                        let mut gyro_energy = 0.0f32;
+
                         for i in 0..test_len {
                             correlation += setpoint[axis][i] * gyro[axis][i + lag];
+                            gyro_energy += gyro[axis][i + lag] * gyro[axis][i + lag];
                         }
-                        if correlation > best_correlation {
-                            best_correlation = correlation;
+
+                        // Normalize by energy to make correlation amplitude-independent
+                        let normalization = (setpoint_energy * gyro_energy).sqrt().max(1e-10);
+                        let normalized_corr = correlation / normalization;
+
+                        if normalized_corr > best_correlation {
+                            best_correlation = normalized_corr;
                             best_lag = lag;
                         }
                     }
@@ -636,9 +647,8 @@ impl AnalysisResults {
 
                 // Calculate overall imbalance percentage
                 let avg_all = motor_avg_output.iter().sum::<f32>() / 4.0;
-                if avg_all > 1.0 {
-                    motor_imbalance_pct = (motor_differential / avg_all) * 100.0;
-                }
+                // Use max(1.0) to prevent division issues with very low values
+                motor_imbalance_pct = (motor_differential / avg_all.max(1.0)) * 100.0;
 
                 // Identify front-back vs left-right imbalance
                 // Standard quad motor order: 0=FR, 1=RR, 2=RL, 3=FL (or similar)
@@ -1586,7 +1596,9 @@ impl SuggestionsTab {
         }
 
         // Check dyn notch range for high-KV motors
-        if dyn_notch_max < 500.0 && analysis.gyro_noise_high_throttle > analysis.gyro_noise_mid_throttle * 1.3 {
+        if dyn_notch_max < 500.0
+            && analysis.gyro_noise_high_throttle > analysis.gyro_noise_mid_throttle * 1.3
+        {
             suggestions.push(TuningSuggestion {
                 category: "Dynamic Notch".to_string(),
                 title: "Dynamic notch max frequency may be too low".to_string(),
@@ -1675,9 +1687,10 @@ impl SuggestionsTab {
         let anti_gravity_cutoff = get_val(&["anti_gravity_cutoff_hz"]).unwrap_or(5.0);
 
         // Check if low-throttle tracking is poor (punch-outs/dive recovery)
-        let low_throttle_error = (analysis.tracking_error_by_throttle[0][0] 
-            + analysis.tracking_error_by_throttle[1][0]) / 2.0;
-        
+        let low_throttle_error = (analysis.tracking_error_by_throttle[0][0]
+            + analysis.tracking_error_by_throttle[1][0])
+            / 2.0;
+
         if low_throttle_error > 12.0 && analysis.throttle_variance > 15.0 {
             if anti_gravity_p_gain < 120.0 {
                 suggestions.push(TuningSuggestion {
@@ -1709,14 +1722,32 @@ impl SuggestionsTab {
         }
 
         // === I-TERM RELAX OPTIMIZATION ===
-        let iterm_relax = headers.get("iterm_relax").map(|s| s.as_str()).unwrap_or("RP");
-        let iterm_relax_type = headers.get("iterm_relax_type").map(|s| s.as_str()).unwrap_or("1");
+        let iterm_relax = headers
+            .get("iterm_relax")
+            .map(|s| s.as_str())
+            .unwrap_or("RP");
+        let iterm_relax_type = headers
+            .get("iterm_relax_type")
+            .map(|s| s.as_str())
+            .unwrap_or("1");
         let iterm_relax_cutoff = get_val(&["iterm_relax_cutoff"]).unwrap_or(15.0);
 
         if analysis.iterm_windup_events > 80 {
-            let suggested_type = if analysis.avg_throttle_pct > 55.0 { "SETPOINT" } else { "GYRO" };
-            let suggested_cutoff = if analysis.avg_throttle_pct > 55.0 { 20 } else { 12 };
-            let flying_style = if analysis.avg_throttle_pct > 55.0 { "aggressive" } else { "smooth" };
+            let suggested_type = if analysis.avg_throttle_pct > 55.0 {
+                "SETPOINT"
+            } else {
+                "GYRO"
+            };
+            let suggested_cutoff = if analysis.avg_throttle_pct > 55.0 {
+                20
+            } else {
+                12
+            };
+            let flying_style = if analysis.avg_throttle_pct > 55.0 {
+                "aggressive"
+            } else {
+                "smooth"
+            };
 
             suggestions.push(TuningSuggestion {
                 category: "I-Term Relax".to_string(),
@@ -1760,9 +1791,10 @@ impl SuggestionsTab {
         let tpa_low_breakpoint = get_val(&["tpa_low_breakpoint"]).unwrap_or(1050.0);
 
         // High-throttle tracking issues - TPA may be too aggressive
-        let high_throttle_error = (analysis.tracking_error_by_throttle[0][2] 
-            + analysis.tracking_error_by_throttle[1][2]) / 2.0;
-        
+        let high_throttle_error = (analysis.tracking_error_by_throttle[0][2]
+            + analysis.tracking_error_by_throttle[1][2])
+            / 2.0;
+
         if high_throttle_error > 18.0 && tpa_rate > 60.0 {
             suggestions.push(TuningSuggestion {
                 category: "TPA".to_string(),
@@ -1781,7 +1813,9 @@ impl SuggestionsTab {
         }
 
         // TPA Low Rate suggestion for low-throttle oscillations
-        if analysis.gyro_noise_low_throttle > analysis.gyro_noise_mid_throttle * 1.3 && tpa_low_rate < 10.0 {
+        if analysis.gyro_noise_low_throttle > analysis.gyro_noise_mid_throttle * 1.3
+            && tpa_low_rate < 10.0
+        {
             suggestions.push(TuningSuggestion {
                 category: "TPA".to_string(),
                 title: "Consider TPA Low for low-throttle noise".to_string(),
@@ -1839,8 +1873,12 @@ impl SuggestionsTab {
         let ff_boost = get_val(&["feedforward_boost"]).unwrap_or(15.0);
 
         if analysis.setpoint_jitter > 8.0 {
-            let suggested_jitter = if analysis.setpoint_jitter > 15.0 { 15 } else { 12 };
-            
+            let suggested_jitter = if analysis.setpoint_jitter > 15.0 {
+                15
+            } else {
+                12
+            };
+
             if ff_jitter < suggested_jitter as f32 {
                 suggestions.push(TuningSuggestion {
                     category: "Feedforward".to_string(),
@@ -1907,15 +1945,18 @@ impl SuggestionsTab {
         }
 
         // === CRASH RECOVERY & SAFETY ===
-        let crash_recovery = headers.get("crash_recovery").map(|s| s.as_str()).unwrap_or("0");
+        let crash_recovery = headers
+            .get("crash_recovery")
+            .map(|s| s.as_str())
+            .unwrap_or("0");
         let ez_landing_threshold = get_val(&["ez_landing_threshold"]).unwrap_or(25.0);
         let landing_disarm = get_val(&["landing_disarm_threshold"]).unwrap_or(0.0);
 
         // Suggest crash recovery for high-risk flying
         if crash_recovery == "0" || crash_recovery.to_lowercase() == "off" {
-            let high_risk = analysis.motor_saturation_pct > 15.0 
+            let high_risk = analysis.motor_saturation_pct > 15.0
                 || analysis.gyro_noise_rms.iter().any(|&n| n > 50.0);
-            
+
             if high_risk {
                 suggestions.push(TuningSuggestion {
                     category: "Safety".to_string(),
@@ -1944,7 +1985,7 @@ impl SuggestionsTab {
 
         // === THRUST LINEARIZATION ===
         let thrust_linear = get_val(&["thrust_linear", "thrustLinearization"]).unwrap_or(0.0);
-        
+
         // Detect non-linear throttle response (poor tracking at varying throttle)
         let throttle_tracking_variance = (high_throttle_error - low_throttle_error).abs();
         if throttle_tracking_variance > 10.0 && thrust_linear < 20.0 {
@@ -1963,7 +2004,7 @@ impl SuggestionsTab {
 
         // === VBAT SAG COMPENSATION ===
         let vbat_sag = get_val(&["vbat_sag_compensation"]).unwrap_or(0.0);
-        
+
         // If flight is long and tracking degrades at end (heuristic: high variance)
         if flight_duration > 120.0 && vbat_sag < 50.0 && analysis.throttle_variance > 20.0 {
             suggestions.push(TuningSuggestion {
@@ -1981,7 +2022,7 @@ impl SuggestionsTab {
 
         // === ABSOLUTE CONTROL ===
         let abs_control_gain = get_val(&["abs_control_gain"]).unwrap_or(0.0);
-        
+
         // Suggest abs control for precision flying (low throttle variance = cinematic)
         if analysis.throttle_variance < 10.0 && abs_control_gain < 5.0 {
             suggestions.push(TuningSuggestion {
@@ -1995,7 +2036,10 @@ impl SuggestionsTab {
         }
 
         // === INTEGRATED YAW ===
-        let integrated_yaw = headers.get("use_integrated_yaw").map(|s| s != "0").unwrap_or(false);
+        let integrated_yaw = headers
+            .get("use_integrated_yaw")
+            .map(|s| s != "0")
+            .unwrap_or(false);
         let integrated_yaw_relax = get_val(&["integrated_yaw_relax"]).unwrap_or(200.0);
 
         // Yaw tracking issues with tail-heavy quads
@@ -2015,7 +2059,7 @@ impl SuggestionsTab {
 
         // === MOTOR OUTPUT LIMIT ===
         let motor_output_limit = get_val(&["motor_output_limit"]).unwrap_or(100.0);
-        
+
         if analysis.motor_saturation_pct > 25.0 && motor_output_limit > 95.0 {
             suggestions.push(TuningSuggestion {
                 category: "Motor Limit".to_string(),
@@ -2049,8 +2093,14 @@ impl SuggestionsTab {
         }
 
         // === FILTER TYPE OPTIMIZATION ===
-        let dterm_lpf1_type = headers.get("dterm_lpf1_type").map(|s| s.as_str()).unwrap_or("0");
-        let gyro_lpf1_type = headers.get("gyro_lpf1_type").map(|s| s.as_str()).unwrap_or("0");
+        let dterm_lpf1_type = headers
+            .get("dterm_lpf1_type")
+            .map(|s| s.as_str())
+            .unwrap_or("0");
+        let gyro_lpf1_type = headers
+            .get("gyro_lpf1_type")
+            .map(|s| s.as_str())
+            .unwrap_or("0");
 
         // Suggest PT2/PT3 for better phase response if latency is acceptable
         if dterm_lpf1_type == "0" && analysis.avg_latency_ms < 8.0 && max_dterm_noise > 40.0 {
@@ -2441,7 +2491,7 @@ impl SuggestionsTab {
 
                         // Save Settings button
                         if ui
-                            .button("↓ Save Settings")
+                            .button(format!("{} Save Settings", icons::FLOPPY_DISK))
                             .on_hover_text("Save API key and model selection for next session")
                             .clicked()
                         {
@@ -2450,6 +2500,7 @@ impl SuggestionsTab {
                                     api_key: self.api_key.clone(),
                                     selected_model_id: self.selected_model_id.clone(),
                                 },
+                                ui: Default::default(),
                             };
                             settings.save();
                             analytics::log_ai_settings_saved();
@@ -2555,7 +2606,7 @@ impl SuggestionsTab {
                                                             .color(Color32::LIGHT_GREEN),
                                                     );
                                                     if ui
-                                                        .small_button("⎘")
+                                                        .small_button(icons::CLIPBOARD)
                                                         .on_hover_text("Copy")
                                                         .clicked()
                                                     {
@@ -2582,11 +2633,11 @@ impl SuggestionsTab {
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button("⎘ Copy Response").clicked() {
+                            if ui.button(format!("{} Copy Response", icons::CLIPBOARD)).clicked() {
                                 ui.output_mut(|o| o.copied_text = response.clone());
                                 analytics::log_ai_response_copied();
                             }
-                            if ui.button("✗ Clear").clicked() {
+                            if ui.button(format!("{} Clear", icons::TRASH)).clicked() {
                                 clear_ai_response = true;
                             }
                         });
@@ -2601,7 +2652,11 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === QUICK ACTIONS PANEL ===
-            ui.label(RichText::new(format!("{} Quick Tuning Status", icons::GAUGE)).strong().size(16.0));
+            ui.label(
+                RichText::new(format!("{} Quick Tuning Status", icons::GAUGE))
+                    .strong()
+                    .size(16.0),
+            );
             ui.add_space(4.0);
 
             // Calculate status for each tuning area
@@ -2637,9 +2692,14 @@ impl SuggestionsTab {
 
             ui.add_space(4.0);
             ui.label(
-                RichText::new(format!("{} = Good  {} = Needs Attention  {} = Critical", icons::CHECK_CIRCLE, icons::WARNING_CIRCLE, icons::X_CIRCLE))
-                    .weak()
-                    .size(14.0),
+                RichText::new(format!(
+                    "{} = Good  {} = Needs Attention  {} = Critical",
+                    icons::CHECK_CIRCLE,
+                    icons::WARNING_CIRCLE,
+                    icons::X_CIRCLE
+                ))
+                .weak()
+                .size(14.0),
             );
 
             ui.add_space(16.0);
@@ -2647,7 +2707,11 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === RULE-BASED SUGGESTIONS ===
-            ui.label(RichText::new(format!("{} Automated Analysis", icons::ROBOT)).strong().size(16.0));
+            ui.label(
+                RichText::new(format!("{} Automated Analysis", icons::ROBOT))
+                    .strong()
+                    .size(16.0),
+            );
             ui.label("Based on analysis of your flight log, here are tuning recommendations:");
             ui.add_space(8.0);
 
@@ -2655,8 +2719,10 @@ impl SuggestionsTab {
             ui.horizontal(|ui| {
                 // Copy All button - groups by severity for safe application order
                 if ui
-                    .button("⎘ Copy All CLI Commands")
-                    .on_hover_text("Copy all CLI commands to clipboard (Critical -> Warning -> Info)")
+                    .button(format!("{} Copy All CLI Commands", icons::CLIPBOARD))
+                    .on_hover_text(
+                        "Copy all CLI commands to clipboard (Critical -> Warning -> Info)",
+                    )
                     .clicked()
                 {
                     let all_commands = self.generate_cli_export();
@@ -2793,7 +2859,7 @@ impl SuggestionsTab {
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
                                                     if ui
-                                                        .button("⎘ Copy")
+                                                        .button(format!("{} Copy", icons::CLIPBOARD))
                                                         .on_hover_text("Copy to clipboard")
                                                         .clicked()
                                                     {
@@ -3202,7 +3268,11 @@ impl SuggestionsTab {
                 egui::Color32::from_rgb(255, 200, 80),
                 "Needs attention",
             ),
-            Severity::Info => (icons::CHECK_CIRCLE, egui::Color32::from_rgb(80, 255, 80), "Looking good"),
+            Severity::Info => (
+                icons::CHECK_CIRCLE,
+                egui::Color32::from_rgb(80, 255, 80),
+                "Looking good",
+            ),
         };
 
         let response = ui

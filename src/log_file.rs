@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::mpsc::Sender;
 
 use blackbox_log::headers::ParseError;
@@ -7,12 +8,14 @@ use crate::flight_data::FlightData;
 #[derive(Clone)]
 pub struct LogFile {
     pub file_name: String,
+    pub file_path: Option<PathBuf>,
     pub flights: Vec<Result<FlightData, ParseError>>,
 }
 
 impl LogFile {
     pub async fn parse(
         file_name: String,
+        file_path: Option<PathBuf>,
         bytes: Vec<u8>,
         file_progress_sender: Sender<f32>,
         flight_progress_sender: Sender<f32>,
@@ -47,6 +50,6 @@ impl LogFile {
             gloo_timers::future::TimeoutFuture::new(0).await;
         }
 
-        Self { file_name, flights }
+        Self { file_name, file_path, flights }
     }
 }

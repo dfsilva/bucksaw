@@ -82,14 +82,14 @@ fn apply_lowess_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
         let start = i.saturating_sub(half_window);
         let end = (i + half_window + 1).min(data.len());
         let window = &data[start..end];
-        
+
         // LOWESS uses tricube weighting centered at the current point
         let center = i as f32;
         let max_dist = half_window as f32;
-        
+
         let mut weighted_sum = 0.0f32;
         let mut weight_sum = 0.0f32;
-        
+
         for (j, &val) in window.iter().enumerate() {
             let pos = (start + j) as f32;
             let dist = (pos - center).abs() / (max_dist + 1.0);
@@ -103,8 +103,12 @@ fn apply_lowess_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
             weighted_sum += val * weight;
             weight_sum += weight;
         }
-        
-        smoothed.push(if weight_sum > 0.0 { weighted_sum / weight_sum } else { data[i] });
+
+        smoothed.push(if weight_sum > 0.0 {
+            weighted_sum / weight_sum
+        } else {
+            data[i]
+        });
     }
 
     smoothed
@@ -185,15 +189,24 @@ impl Pt2Filter {
         // Apply cutoff correction for -3dB at specified frequency
         let omega = 2.0 * std::f64::consts::PI * cutoff_hz * CUTOFF_CORRECTION_PT2 * dt;
         let k = omega / (omega + 1.0);
-        Self { state1: 0.0, state: 0.0, k }
+        Self {
+            state1: 0.0,
+            state: 0.0,
+            k,
+        }
     }
 
     /// Create from time constant (delay to reach 63.2% of step input) in ms
+    /// Note: Cutoff correction is NOT applied here since we're working with time constant directly
     pub fn from_time_constant_ms(time_constant_ms: f64, sample_rate: f64) -> Self {
         let dt = 1.0 / sample_rate;
-        let delay = time_constant_ms / 1000.0 * CUTOFF_CORRECTION_PT2;
+        let delay = time_constant_ms / 1000.0;
         let k = if delay > 0.0 { dt / (dt + delay) } else { 1.0 };
-        Self { state1: 0.0, state: 0.0, k }
+        Self {
+            state1: 0.0,
+            state: 0.0,
+            k,
+        }
     }
 
     pub fn apply(&mut self, input: f64) -> f64 {
@@ -223,7 +236,12 @@ impl Pt3Filter {
         // Apply cutoff correction for -3dB at specified frequency
         let omega = 2.0 * std::f64::consts::PI * cutoff_hz * CUTOFF_CORRECTION_PT3 * dt;
         let k = omega / (omega + 1.0);
-        Self { state1: 0.0, state2: 0.0, state: 0.0, k }
+        Self {
+            state1: 0.0,
+            state2: 0.0,
+            state: 0.0,
+            k,
+        }
     }
 
     pub fn apply(&mut self, input: f64) -> f64 {
@@ -260,7 +278,7 @@ impl FilterType {
             FilterType::Pt3 => 135.0, // -135° at cutoff
         }
     }
-    
+
     /// Calculate phase delay in milliseconds at a given frequency
     pub fn phase_delay_ms(&self, freq_hz: f64) -> f64 {
         let phase_deg = self.phase_delay_at_cutoff();
@@ -289,9 +307,9 @@ pub fn generate_ideal_step_response(
 ) -> Vec<(f64, f64)> {
     let num_samples = ((max_time_ms / 1000.0) * sample_rate) as usize;
     let dt_ms = 1000.0 / sample_rate;
-    
+
     let mut result = Vec::with_capacity(num_samples);
-    
+
     match filter_type {
         FilterType::Pt1 => {
             // Analytical solution: y(t) = 1 - e^(-t/τ)
@@ -324,7 +342,7 @@ pub fn generate_ideal_step_response(
             }
         }
     }
-    
+
     result
 }
 

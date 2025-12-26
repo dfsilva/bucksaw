@@ -34,7 +34,7 @@ pub use vibe::*;
 const PLOT_HEIGHT: f32 = 300.0;
 const MIN_WIDE_WIDTH: f32 = 1000.0;
 
-#[derive(Default, Clone, Copy, PartialEq)]
+#[derive(Default, Clone, Copy, PartialEq, Debug)]
 pub enum FlightViewTab {
     #[default]
     Dashboard,
@@ -69,6 +69,25 @@ impl FlightViewTab {
             Self::Logs => format!("{} Logs", icons::LIST_BULLETS),
             Self::Feedforward => format!("{} Feedforward", icons::ARROW_FAT_RIGHT),
             Self::TuningGuide => format!("{} Guide", icons::BOOK_OPEN),
+        }
+    }
+
+    /// Returns short label without icon (for compact displays)
+    pub fn short_label(&self) -> &'static str {
+        match self {
+            Self::Dashboard => "Dashboard",
+            Self::Plot => "Plot",
+            Self::Tune => "Tune",
+            Self::Vibe => "Vibe",
+            Self::Stats => "Stats",
+            Self::Anomalies => "Anomalies",
+            Self::Error => "Error",
+            Self::Setup => "Setup",
+            Self::Suggestions => "Suggest",
+            Self::Filter => "Filter",
+            Self::Logs => "Logs",
+            Self::Feedforward => "FF",
+            Self::TuningGuide => "Guide",
         }
     }
     

@@ -4,19 +4,40 @@ use std::sync::Arc;
 
 use crate::analytics;
 use crate::flight_data::FlightData;
+use super::FlightViewTab;
 
 /// Action to navigate to a different tab with optional time range focus
 #[derive(Clone, Debug)]
 pub struct NavigationAction {
-    pub target_time_start: f64,
-    pub target_time_end: f64,
+    pub target_tab: Option<FlightViewTab>,
+    pub target_time_start: Option<f64>,
+    pub target_time_end: Option<f64>,
 }
 
 impl NavigationAction {
     pub fn new(start: f64, end: f64) -> Self {
         Self {
-            target_time_start: start,
-            target_time_end: end,
+            target_tab: None,
+            target_time_start: Some(start),
+            target_time_end: Some(end),
+        }
+    }
+
+    /// Navigate to a specific tab without changing time range
+    pub fn to_tab(tab: FlightViewTab) -> Self {
+        Self {
+            target_tab: Some(tab),
+            target_time_start: None,
+            target_time_end: None,
+        }
+    }
+
+    /// Navigate to a specific tab with time range focus
+    pub fn to_tab_with_range(tab: FlightViewTab, start: f64, end: f64) -> Self {
+        Self {
+            target_tab: Some(tab),
+            target_time_start: Some(start),
+            target_time_end: Some(end),
         }
     }
 
@@ -24,8 +45,9 @@ impl NavigationAction {
     pub fn with_context(start: f64, end: f64, total_duration: f64) -> Self {
         let margin = (end - start).max(0.5); // At least 0.5s context
         Self {
-            target_time_start: (start - margin).max(0.0),
-            target_time_end: (end + margin).min(total_duration),
+            target_tab: None,
+            target_time_start: Some((start - margin).max(0.0)),
+            target_time_end: Some((end + margin).min(total_duration)),
         }
     }
 }

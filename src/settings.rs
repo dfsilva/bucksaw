@@ -12,10 +12,37 @@ pub struct AISettings {
     pub selected_model_id: Option<String>,
 }
 
+/// UI/display preferences
+#[derive(Clone, Default, Serialize, Deserialize)]
+pub struct UISettings {
+    /// Dark mode preference: None = system default, Some(true) = dark, Some(false) = light
+    pub dark_mode: Option<bool>,
+    /// Whether to show the left sidebar panel
+    pub left_panel_open: Option<bool>,
+    /// Recently opened files (for quick access)
+    #[serde(default)]
+    pub recent_files: Vec<String>,
+}
+
 /// All persisted application settings
 #[derive(Clone, Default, Serialize, Deserialize)]
 pub struct AppSettings {
     pub ai: AISettings,
+    #[serde(default)]
+    pub ui: UISettings,
+}
+
+impl AppSettings {
+    /// Add a file to recent files list (max 10)
+    pub fn add_recent_file(&mut self, path: &str) {
+        // Remove if already exists
+        self.ui.recent_files.retain(|p| p != path);
+        // Add to front
+        self.ui.recent_files.insert(0, path.to_string());
+        // Keep only last 10
+        self.ui.recent_files.truncate(10);
+        self.save();
+    }
 }
 
 const SETTINGS_KEY: &str = "pid_lab_settings";

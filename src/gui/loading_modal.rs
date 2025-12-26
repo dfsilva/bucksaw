@@ -1,4 +1,4 @@
-use egui::{Align2, Color32, FontId, RichText};
+use egui::{Color32, FontId, RichText};
 
 /// A global loading modal that displays a centered overlay with a spinner
 /// Use this for long-running operations that block the UI

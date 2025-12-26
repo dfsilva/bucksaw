@@ -120,7 +120,7 @@ impl LogsTab {
                     ui.add_space(16.0);
 
                     // Clear button
-                    if ui.button("✗ Clear").clicked() {
+                    if ui.button(format!("{} Clear", icons::TRASH)).clicked() {
                         logger().clear();
                         analytics::log_logs_cleared();
                     }

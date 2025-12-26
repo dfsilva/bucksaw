@@ -317,12 +317,12 @@ impl TuneTab {
                     if m.has_oscillations {
                         ui.colored_label(
                             egui::Color32::from_rgb(0xfb, 0x49, 0x34),
-                            "⚠ Yes",
+                            format!("{} Yes", icons::WARNING),
                         );
                     } else {
                         ui.colored_label(
                             egui::Color32::from_rgb(0x8e, 0xc0, 0x7c),
-                            "✓ No",
+                            format!("{} No", icons::CHECK),
                         );
                     }
                 }
@@ -614,13 +614,13 @@ impl TuneTab {
             &responses.yaw_metrics,
         ];
 
-        let mut hints: Vec<(&str, egui::Color32)> = Vec::new();
+        let mut hints: Vec<(String, egui::Color32)> = Vec::new();
 
         // Check for high overshoot (suggests too much P or D)
         let max_overshoot = metrics.iter().map(|m| m.overshoot_pct).fold(0.0f32, f32::max);
         if max_overshoot > 25.0 {
             hints.push((
-                "⚠ High overshoot detected. Consider reducing P gain or increasing D gain.",
+                format!("{} High overshoot detected. Consider reducing P gain or increasing D gain.", icons::WARNING),
                 egui::Color32::from_rgb(0xfa, 0xbd, 0x2f),
             ));
         }
@@ -629,7 +629,7 @@ impl TuneTab {
         let has_oscillations = metrics.iter().any(|m| m.has_oscillations);
         if has_oscillations {
             hints.push((
-                "⚠ Oscillations detected. This usually indicates P gain is too high or filtering is too aggressive.",
+                format!("{} Oscillations detected. This usually indicates P gain is too high or filtering is too aggressive.", icons::WARNING),
                 egui::Color32::from_rgb(0xfb, 0x49, 0x34),
             ));
         }
@@ -638,7 +638,7 @@ impl TuneTab {
         let max_rise_time = metrics.iter().map(|m| m.rise_time_ms).fold(0.0f32, f32::max);
         if max_rise_time > 100.0 {
             hints.push((
-                "ℹ Slow response detected. Consider increasing P gain or feedforward.",
+                format!("{} Slow response detected. Consider increasing P gain or feedforward.", icons::INFO),
                 egui::Color32::from_rgb(0x83, 0xa5, 0x98),
             ));
         }
@@ -650,7 +650,7 @@ impl TuneTab {
             .fold(0.0f32, f32::max);
         if max_ss_error > 0.1 {
             hints.push((
-                "ℹ High steady-state error. Consider increasing I gain.",
+                format!("{} High steady-state error. Consider increasing I gain.", icons::INFO),
                 egui::Color32::from_rgb(0x83, 0xa5, 0x98),
             ));
         }
@@ -662,7 +662,7 @@ impl TuneTab {
             && max_ss_error < 0.05
         {
             hints.push((
-                "✓ Tune looks good! Low overshoot, fast response, no oscillations.",
+                format!("{} Tune looks good! Low overshoot, fast response, no oscillations.", icons::CHECK_CIRCLE),
                 egui::Color32::from_rgb(0x8e, 0xc0, 0x7c),
             ));
         }
@@ -671,7 +671,7 @@ impl TuneTab {
             ui.group(|ui| {
                 ui.label(egui::RichText::new(format!("{} Tuning Hints", icons::LIGHTBULB)).strong());
                 for (hint, color) in hints {
-                    ui.colored_label(color, hint);
+                    ui.colored_label(color, &hint);
                 }
             });
         }

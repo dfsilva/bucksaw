@@ -106,7 +106,7 @@ impl DashboardMetrics {
         let filter_score = noise_score; // Simplified - same as noise for now
 
         // Overall score is weighted average
-        let overall_score = (noise_score * 0.35 + tracking_score * 0.35 + motor_score * 0.30);
+        let overall_score = noise_score * 0.35 + tracking_score * 0.35 + motor_score * 0.30;
 
         let overall_health = if overall_score >= 85.0 {
             HealthLevel::Excellent
@@ -287,7 +287,7 @@ impl DashboardMetrics {
         let gyro_score = (100.0 - avg_gyro.clamp(0.0, 100.0)).max(0.0);
         let dterm_score = (100.0 - (avg_dterm / 2.0).clamp(0.0, 100.0)).max(0.0);
 
-        (gyro_score * 0.6 + dterm_score * 0.4)
+        gyro_score * 0.6 + dterm_score * 0.4
     }
 
     fn calculate_tracking_score(error: &[f32; 3]) -> f32 {
@@ -307,14 +307,27 @@ pub struct DashboardTab {
     metrics: DashboardMetrics,
 }
 
+/// Card click target - which tab to navigate to
+#[derive(Clone, Copy, PartialEq)]
+pub enum DashboardCardTarget {
+    None,
+    Vibe,     // Noise card -> Vibe tab
+    Error,    // Tracking card -> Error tab  
+    Stats,    // Motors card -> Stats tab
+    Filter,   // Filtering card -> Filter tab
+    Anomalies, // Anomalies section -> Anomalies tab
+}
+
 impl DashboardTab {
     pub fn new(fd: Arc<FlightData>) -> Self {
         let metrics = DashboardMetrics::compute(&fd);
         Self { fd, metrics }
     }
 
-    pub fn show(&mut self, ui: &mut Ui) {
+    /// Show the dashboard and return a target tab if a card was clicked
+    pub fn show(&mut self, ui: &mut Ui) -> DashboardCardTarget {
         let colors = Colors::get(ui);
+        let mut clicked_target = DashboardCardTarget::None;
 
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Header with overall health
@@ -341,41 +354,56 @@ impl DashboardTab {
             ui.add_space(16.0);
 
             // Score cards grid
-            ui.label(RichText::new("Analysis Scores").strong().size(15.0));
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("Analysis Scores").strong().size(15.0));
+                ui.label(RichText::new("(click to explore)").weak().size(11.0));
+            });
             ui.add_space(8.0);
 
             ui.horizontal(|ui| {
-                self.show_score_card(
+                if self.show_score_card(
                     ui,
-                    "∼ Noise",
+                    icons::WAVE_SINE,
+                    "Noise",
                     self.metrics.noise_score,
-                    "Lower is better. Based on gyro and D-term noise levels.",
+                    "Click to view frequency spectrum in Vibe tab",
                     colors.gyro_filtered,
-                );
+                ) {
+                    clicked_target = DashboardCardTarget::Vibe;
+                }
                 ui.add_space(12.0);
-                self.show_score_card(
+                if self.show_score_card(
                     ui,
-                    "◎ Tracking",
+                    icons::CROSSHAIR,
+                    "Tracking",
                     self.metrics.tracking_score,
-                    "How well gyro follows setpoint. Higher is better.",
+                    "Click to view PID error analysis in Error tab",
                     colors.setpoint,
-                );
+                ) {
+                    clicked_target = DashboardCardTarget::Error;
+                }
                 ui.add_space(12.0);
-                self.show_score_card(
+                if self.show_score_card(
                     ui,
-                    "↗ Motors",
+                    icons::FAN,
+                    "Motors",
                     self.metrics.motor_score,
-                    "Motor saturation and balance. Higher is better.",
+                    "Click to view motor statistics in Stats tab",
                     colors.motors[0],
-                );
+                ) {
+                    clicked_target = DashboardCardTarget::Stats;
+                }
                 ui.add_space(12.0);
-                self.show_score_card(
+                if self.show_score_card(
                     ui,
-                    "| Filtering",
+                    icons::FUNNEL,
+                    "Filtering",
                     self.metrics.filter_score,
-                    "Filter effectiveness score.",
+                    "Click to view filter settings in Filter tab",
                     colors.d,
-                );
+                ) {
+                    clicked_target = DashboardCardTarget::Filter;
+                }
             });
 
             ui.add_space(16.0);
@@ -422,19 +450,30 @@ impl DashboardTab {
 
             ui.add_space(16.0);
 
-            // Anomalies summary
+            // Anomalies summary - clickable
             if self.metrics.anomaly_count > 0 {
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⚠ Anomalies Detected:").strong());
-                    ui.colored_label(
-                        Color32::from_rgb(0xfb, 0x49, 0x34),
-                        format!("{} events", self.metrics.anomaly_count),
-                    );
-                    ui.label("→ Check Anomalies tab for details");
-                });
+                let anomaly_response = egui::Frame::none()
+                    .fill(Color32::from_rgb(0xfb, 0x49, 0x34).gamma_multiply(0.15))
+                    .rounding(6.0)
+                    .inner_margin(8.0)
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icons::WARNING).size(18.0).color(Color32::from_rgb(0xfb, 0x49, 0x34)));
+                            ui.label(RichText::new("Anomalies Detected:").strong());
+                            ui.colored_label(
+                                Color32::from_rgb(0xfb, 0x49, 0x34),
+                                format!("{} events", self.metrics.anomaly_count),
+                            );
+                            ui.label(RichText::new(format!("{} Click to investigate", icons::ARROW_RIGHT)).weak());
+                        });
+                    }).response;
+                    
+                if anomaly_response.interact(egui::Sense::click()).on_hover_text("View detailed anomaly analysis").clicked() {
+                    clicked_target = DashboardCardTarget::Anomalies;
+                }
             } else {
                 ui.label(
-                    RichText::new("✓ No anomalies detected")
+                    RichText::new(format!("{} No anomalies detected", icons::CHECK_CIRCLE))
                         .color(Color32::from_rgb(0x83, 0xa5, 0x98)),
                 );
             }
@@ -444,26 +483,35 @@ impl DashboardTab {
             // Quick navigation hints
             ui.separator();
             ui.add_space(8.0);
-            ui.label(RichText::new("★ Quick Tips").strong());
+            ui.label(RichText::new(format!("{} Quick Tips", icons::LIGHTBULB)).strong());
 
             if self.metrics.noise_score < 70.0 {
-                ui.label("• High noise detected → Check Filter tab for tuning suggestions");
+                ui.label(format!("• High noise detected {} Check Vibe tab for frequency analysis", icons::ARROW_RIGHT));
             }
             if self.metrics.tracking_score < 70.0 {
-                ui.label("• Tracking issues → Check Error tab for detailed analysis");
+                ui.label(format!("• Tracking issues {} Check Error tab for PID analysis", icons::ARROW_RIGHT));
             }
             if self.metrics.motor_saturation_pct > 5.0 {
-                ui.label("• Motor saturation → Check Suggestions tab for PID recommendations");
+                ui.label(format!("• Motor saturation {} Check Suggestions tab for recommendations", icons::ARROW_RIGHT));
             }
             if self.metrics.noise_score >= 70.0
                 && self.metrics.tracking_score >= 70.0
                 && self.metrics.motor_saturation_pct <= 5.0
             {
                 ui.label(
-                    "• Flight looks well-tuned! Check Tune tab for fine-tuning opportunities.",
+                    format!("{} Flight looks well-tuned! Check Tune tab for fine-tuning.", icons::CHECK_CIRCLE),
                 );
             }
+
+            ui.add_space(16.0);
+
+            // Keyboard shortcut hint
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(format!("{} Tip: Press 1-9 to quickly switch tabs", icons::KEYBOARD)).weak().size(11.0));
+            });
         });
+
+        clicked_target
     }
 
     fn show_flight_info_card(&self, ui: &mut Ui) {
@@ -529,11 +577,12 @@ impl DashboardTab {
     fn show_score_card(
         &self,
         ui: &mut Ui,
+        icon: &str,
         label: &str,
         score: f32,
         tooltip: &str,
         _accent: Color32,
-    ) {
+    ) -> bool {
         let health = if score >= 85.0 {
             HealthLevel::Excellent
         } else if score >= 70.0 {
@@ -544,14 +593,17 @@ impl DashboardTab {
             HealthLevel::Poor
         };
 
-        egui::Frame::none()
+        let response = egui::Frame::none()
             .fill(ui.style().visuals.extreme_bg_color)
             .rounding(8.0)
             .inner_margin(12.0)
             .show(ui, |ui| {
-                ui.set_min_width(100.0);
+                ui.set_min_width(110.0);
                 ui.vertical(|ui| {
-                    ui.label(RichText::new(label).size(13.0));
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icon).size(16.0).color(health.color()));
+                        ui.label(RichText::new(label).size(13.0));
+                    });
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!("{:.0}", score))
@@ -561,14 +613,29 @@ impl DashboardTab {
                         );
                         ui.label(RichText::new("/100").weak().size(12.0));
                     });
-                    ui.label(
-                        RichText::new(health.label())
-                            .size(11.0)
-                            .color(health.color()),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(health.label())
+                                .size(11.0)
+                                .color(health.color()),
+                        );
+                        ui.label(RichText::new(icons::ARROW_RIGHT).size(10.0).weak());
+                    });
                 });
             })
-            .response
-            .on_hover_text(tooltip);
+            .response;
+
+        let clicked = response.interact(egui::Sense::click()).on_hover_text(tooltip).on_hover_cursor(egui::CursorIcon::PointingHand).clicked();
+        
+        // Visual hover feedback
+        if response.hovered() {
+            ui.painter().rect_stroke(
+                response.rect,
+                8.0,
+                egui::Stroke::new(2.0, health.color().gamma_multiply(0.5)),
+            );
+        }
+
+        clicked
     }
 }
