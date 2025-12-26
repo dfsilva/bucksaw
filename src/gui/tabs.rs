@@ -14,6 +14,7 @@ mod tune;
 mod vibe;
 
 use std::fmt::Display;
+use egui_phosphor::regular as icons;
 
 pub use anomalies::*;
 pub use dashboard::*;
@@ -51,29 +52,26 @@ pub enum FlightViewTab {
     TuningGuide,
 }
 
-impl Display for FlightViewTab {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let val = match self {
-            Self::Dashboard => "▦ Dashboard",
-            Self::Plot => "∿ Plot",
-            Self::Tune => "⚙ Tune",
-            Self::Vibe => "≈ Vibe",
-            Self::Stats => "Σ Stats",
-            Self::Anomalies => "⚠ Anomalies",
-            Self::Error => "× Error",
-            Self::Setup => "☰ Setup",
-            Self::Suggestions => "★ Suggestions",
-            Self::Filter => "⫶ Filter",
-            Self::Logs => "≡ Logs",
-            Self::Feedforward => "➤ Feedforward",
-            Self::TuningGuide => "▷ Guide",
-        };
-
-        write!(f, "{val}",)
-    }
-}
-
 impl FlightViewTab {
+    /// Returns display name with icon
+    pub fn label(&self) -> String {
+        match self {
+            Self::Dashboard => format!("{} Dashboard", icons::SQUARES_FOUR),
+            Self::Plot => format!("{} Plot", icons::CHART_LINE),
+            Self::Tune => format!("{} Tune", icons::GEAR),
+            Self::Vibe => format!("{} Vibe", icons::WAVE_SINE),
+            Self::Stats => format!("{} Stats", icons::CHART_BAR),
+            Self::Anomalies => format!("{} Anomalies", icons::WARNING),
+            Self::Error => format!("{} Error", icons::X_CIRCLE),
+            Self::Setup => format!("{} Setup", icons::SLIDERS),
+            Self::Suggestions => format!("{} Suggestions", icons::LIGHTBULB),
+            Self::Filter => format!("{} Filter", icons::FUNNEL),
+            Self::Logs => format!("{} Logs", icons::LIST_BULLETS),
+            Self::Feedforward => format!("{} Feedforward", icons::ARROW_FAT_RIGHT),
+            Self::TuningGuide => format!("{} Guide", icons::BOOK_OPEN),
+        }
+    }
+    
     /// Returns a clean name suitable for analytics tracking
     pub fn analytics_name(&self) -> &'static str {
         match self {
@@ -91,5 +89,11 @@ impl FlightViewTab {
             Self::Feedforward => "Feedforward",
             Self::TuningGuide => "TuningGuide",
         }
+    }
+}
+
+impl Display for FlightViewTab {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.label())
     }
 }

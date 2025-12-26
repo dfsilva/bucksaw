@@ -19,9 +19,9 @@ use wasm_bindgen::prelude::*;
 // ============================================================================
 
 /// GA4 Measurement Protocol configuration
-/// 
+///
 /// Set these via environment variables at build time, or replace the defaults:
-/// - GA4_MEASUREMENT_ID: Your Measurement ID (e.g., "G-XXXXXXXXXX") 
+/// - GA4_MEASUREMENT_ID: Your Measurement ID (e.g., "G-XXXXXXXXXX")
 ///   This is the `measurementId` from your Firebase config
 /// - GA4_API_SECRET: Your API secret from GA4 Admin > Data Streams > Measurement Protocol
 ///
@@ -107,6 +107,7 @@ fn load_or_generate_client_id() -> String {
     new_id
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn generate_client_id() -> String {
     use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -116,9 +117,20 @@ fn generate_client_id() -> String {
         .unwrap_or(0);
 
     // Simple pseudo-random component
-    let random: u64 = (timestamp as u64).wrapping_mul(1103515245).wrapping_add(12345);
+    let random: u64 = (timestamp as u64)
+        .wrapping_mul(1103515245)
+        .wrapping_add(12345);
 
     format!("{}.{}", random % 1_000_000_000, timestamp)
+}
+
+#[cfg(target_arch = "wasm32")]
+fn generate_client_id() -> String {
+    let timestamp = js_sys::Date::now();
+    let random = js_sys::Math::random();
+
+    // Mimic the format used in native: random part . timestamp
+    format!("{}.{}", (random * 1_000_000_000.0) as u64, timestamp as u64)
 }
 
 // ============================================================================
@@ -249,7 +261,9 @@ async fn send_event_wasm(
     let client = reqwest::Client::new();
     let _response = client
         .post(&url)
-        .header("Content-Type", "application/json")
+        // Use text/plain to avoid CORS preflight (OPTIONS request) which fails
+        // GA4 MP typically accepts JSON in body even with text/plain
+        .header("Content-Type", "text/plain")
         .body(payload.to_string())
         .send()
         .await
@@ -411,15 +425,15 @@ pub fn log_cli_commands_copied(command_count: usize, severity_filter: Option<&st
 
 /// Log when vibe analysis domain is changed
 pub fn log_vibe_domain_changed(domain: &str) {
-    log_event(
-        "vibe_domain_changed",
-        analytics_params!("domain" => domain),
-    );
+    log_event("vibe_domain_changed", analytics_params!("domain" => domain));
 }
 
 /// Log when FFT size is changed
 pub fn log_fft_size_changed(fft_size: usize) {
-    log_event("fft_size_changed", analytics_params!("fft_size" => fft_size));
+    log_event(
+        "fft_size_changed",
+        analytics_params!("fft_size" => fft_size),
+    );
 }
 
 /// Log when colorscheme is changed

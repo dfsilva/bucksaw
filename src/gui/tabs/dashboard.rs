@@ -318,7 +318,7 @@ impl DashboardTab {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Header with overall health
             ui.horizontal(|ui| {
-                ui.heading("▦ Flight Dashboard");
+                ui.heading("# Flight Dashboard");
                 ui.add_space(16.0);
                 ui.label(
                     RichText::new(format!(
@@ -370,7 +370,7 @@ impl DashboardTab {
                 ui.add_space(12.0);
                 self.show_score_card(
                     ui,
-                    "⫶ Filtering",
+                    "| Filtering",
                     self.metrics.filter_score,
                     "Filter effectiveness score.",
                     colors.d,

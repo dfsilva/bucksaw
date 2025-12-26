@@ -925,6 +925,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "egui-phosphor"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c873785789bc94a14dcbbd361cda1e498957fa1b4ec389ba650fd651849463b"
+dependencies = [
+ "egui",
+]
+
+[[package]]
 name = "egui-wgpu"
 version = "0.27.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2492,6 +2501,7 @@ dependencies = [
  "dirs",
  "eframe",
  "egui",
+ "egui-phosphor",
  "egui_extras",
  "egui_oszi",
  "egui_plot",
@@ -2501,6 +2511,7 @@ dependencies = [
  "gloo-timers 0.3.0",
  "image",
  "itertools",
+ "js-sys",
  "log",
  "puffin",
  "puffin_egui",

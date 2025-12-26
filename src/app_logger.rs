@@ -87,8 +87,12 @@ impl AppLogger {
 
         #[cfg(target_arch = "wasm32")]
         {
-            // Simplified for wasm
-            "00:00:00.000".to_string()
+            let date = js_sys::Date::new_0();
+            let hours = date.get_hours();
+            let minutes = date.get_minutes();
+            let seconds = date.get_seconds();
+            let millis = date.get_milliseconds();
+            format!("{:02}:{:02}:{:02}.{:03}", hours, minutes, seconds, millis)
         }
     }
 

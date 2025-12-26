@@ -2039,7 +2039,7 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === QUICK ACTIONS PANEL ===
-            ui.label(RichText::new("▦ Quick Tuning Status").strong().size(16.0));
+            ui.label(RichText::new("# Quick Tuning Status").strong().size(16.0));
             ui.add_space(4.0);
 
             // Calculate status for each tuning area
@@ -2085,7 +2085,7 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === RULE-BASED SUGGESTIONS ===
-            ui.label(RichText::new("≡ Automated Analysis").strong().size(16.0));
+            ui.label(RichText::new("= Automated Analysis").strong().size(16.0));
             ui.label("Based on analysis of your flight log, here are tuning recommendations:");
             ui.add_space(8.0);
 
@@ -2150,7 +2150,7 @@ impl SuggestionsTab {
             // Collapsible CLI Snippet Preview
             if self.suggestions.iter().any(|s| s.cli_command.is_some()) {
                 ui.add_space(8.0);
-                egui::CollapsingHeader::new(RichText::new("≡ CLI Commands Preview").size(13.0))
+                egui::CollapsingHeader::new(RichText::new("= CLI Commands Preview").size(13.0))
                     .default_open(false)
                     .show(ui, |ui| {
                         let preview = self.generate_cli_export();

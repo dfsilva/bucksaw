@@ -70,7 +70,7 @@ impl TuningGuideTab {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.heading("▷ Betaflight Tuning Guide");
+        ui.heading("> Betaflight Tuning Guide");
         ui.label("Follow this interactive workflow to get a locked-in tune.");
         ui.add_space(10.0);
 
@@ -109,7 +109,7 @@ impl TuningGuideTab {
                 ui.label(RichText::new(step.description).size(16.0));
                 ui.add_space(16.0);
 
-                ui.label(RichText::new("≡ Action Items:").strong());
+                ui.label(RichText::new("= Action Items:").strong());
                 for item in step.action_items {
                     ui.horizontal(|ui| {
                         ui.label("•");

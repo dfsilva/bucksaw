@@ -16,6 +16,7 @@ eframe = { version = "0.27.2", default-features = false, features = ["glow", "x1
 egui = { version = "0.27.2", default-features = false }
 egui_plot = { version = "0.27.2", default-features = false }
 egui_extras = { version = "0.27.2", default-features = false, features = ["image", "file"] }
+egui-phosphor = { version = "0.5.0", features = ["regular"] }
 image = { version = "0.24", default-features = false, features = ["png"] }
 rfd = "0.13"
 
@@ -46,6 +47,7 @@ async-std = "1.12.0"
 reqwest = { version = "0.11", default-features = false, features = ["json"] }
 getrandom = { version = "0.2", features = ["js"] }
 gloo-timers = { version = "0.3", features = ["futures"] }
+js-sys = "0.3"
 
 [features]
 profiling = ["dep:puffin", "dep:puffin_egui"]

@@ -41,8 +41,22 @@ impl App {
     pub fn new(cc: &eframe::CreationContext, path: Option<PathBuf>) -> Self {
         egui_extras::install_image_loaders(&cc.egui_ctx);
         
-        // Configure fonts with emoji support
-        Self::setup_fonts(&cc.egui_ctx);
+        // Install Phosphor icons font with high priority for icon glyphs
+        let mut fonts = egui::FontDefinitions::default();
+        
+        // Add Phosphor font data
+        fonts.font_data.insert(
+            "phosphor".into(),
+            egui_phosphor::Variant::Regular.font_data(),
+        );
+        
+        // Insert Phosphor font at the beginning of the Proportional family
+        // so it takes precedence for icon glyphs (PUA characters)
+        if let Some(font_keys) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
+            font_keys.insert(0, "phosphor".into());
+        }
+        
+        cc.egui_ctx.set_fonts(fonts);
 
         let open_file_dialog = Some(OpenFileDialog::new(path));
         Self {
@@ -52,74 +66,6 @@ impl App {
             selected: Selection::default(),
             left_panel_open: true,
         }
-    }
-    
-    /// Configure fonts with emoji/symbol support
-    fn setup_fonts(ctx: &egui::Context) {
-        let mut fonts = egui::FontDefinitions::default();
-        
-        // Try to load system symbol fonts (monochrome, not color emoji)
-        #[cfg(target_os = "macos")]
-        {
-            // macOS: Use Apple Symbols (monochrome, works better with egui)
-            if let Ok(font_data) = std::fs::read("/System/Library/Fonts/Apple Symbols.ttf") {
-                fonts.font_data.insert(
-                    "symbols".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    family.push("symbols".to_owned());
-                }
-            }
-            // Also try SF Symbols or Menlo for better coverage
-            if let Ok(font_data) = std::fs::read("/System/Library/Fonts/Menlo.ttc") {
-                fonts.font_data.insert(
-                    "menlo".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    family.push("menlo".to_owned());
-                }
-            }
-        }
-        
-        #[cfg(target_os = "windows")]
-        {
-            // Windows: Use Segoe UI Symbol (monochrome)
-            if let Ok(font_data) = std::fs::read("C:\\Windows\\Fonts\\seguisym.ttf") {
-                fonts.font_data.insert(
-                    "symbols".to_owned(),
-                    egui::FontData::from_owned(font_data).into(),
-                );
-                if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                    family.push("symbols".to_owned());
-                }
-            }
-        }
-        
-        #[cfg(target_os = "linux")]
-        {
-            // Linux: Try Noto Sans Symbols or DejaVu
-            let symbol_paths = [
-                "/usr/share/fonts/truetype/noto/NotoSansSymbols2-Regular.ttf",
-                "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-                "/usr/share/fonts/TTF/DejaVuSans.ttf",
-            ];
-            for path in symbol_paths {
-                if let Ok(font_data) = std::fs::read(path) {
-                    fonts.font_data.insert(
-                        "symbols".to_owned(),
-                        egui::FontData::from_owned(font_data).into(),
-                    );
-                    if let Some(family) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-                        family.push("symbols".to_owned());
-                    }
-                    break;
-                }
-            }
-        }
-        
-        ctx.set_fonts(fonts);
     }
 
     fn open_log(&mut self, ctx: &egui::Context, file_data: LogFile) {
@@ -225,7 +171,7 @@ impl eframe::App for App {
                 ui.set_enabled(enabled);
                 ui.horizontal_centered(|ui| {
                     if ui
-                        .button(if self.left_panel_open { "⏴" } else { "☰" })
+                        .button(if self.left_panel_open { "<" } else { "=" })
                         .clicked()
                     {
                         self.left_panel_open = !self.left_panel_open;

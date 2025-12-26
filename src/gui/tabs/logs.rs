@@ -67,7 +67,7 @@ impl LogsTab {
     }
 
     pub fn show(&mut self, ui: &mut Ui) {
-        ui.heading("≡ Application Logs");
+        ui.heading("= Application Logs");
         ui.add_space(8.0);
 
         // Controls bar
