@@ -112,6 +112,6 @@ impl OpenFileDialog {
                 });
             });
 
-        self.file.get().clone()
+        self.file.take()
     }
 }

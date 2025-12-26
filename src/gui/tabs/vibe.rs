@@ -1468,18 +1468,12 @@ pub struct VibeTab {
     pid_sum_ffts: FftVectorSeries,
 
     // Cached computed data (needed for FFT callbacks)
-    #[allow(dead_code)]
-    pid_error_data: Option<Arc<[Vec<f32>; 3]>>,
-    #[allow(dead_code)]
-    pid_sum_data: Option<Arc<[Vec<f32>; 3]>>,
+    // removed pid_error_data and pid_sum_data as they are now in FlightData
 
     fd: Arc<FlightData>,
 }
 
 // Static storage for computed data (needed for FFT callbacks)
-static PID_ERROR_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
-static PID_SUM_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
-static D_TERM_CALC_CACHE: OnceLock<[Vec<f32>; 3]> = OnceLock::new();
 
 impl VibeTab {
     pub fn new(ctx: &egui::Context, fd: Arc<FlightData>) -> Self {
@@ -1490,56 +1484,26 @@ impl VibeTab {
             fft_settings.motor_poles = poles;
         }
 
-        // Pre-compute and cache PID error and PID sum data
-        let pid_error_data = if let (Some(sp), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
-            let len = sp[0].len().min(gyro[0].len());
-            let error: [Vec<f32>; 3] = [
-                (0..len).map(|i| sp[0][i] - gyro[0][i]).collect(),
-                (0..len).map(|i| sp[1][i] - gyro[1][i]).collect(),
-                (0..len).map(|i| sp[2][i] - gyro[2][i]).collect(),
-            ];
-            let _ = PID_ERROR_CACHE.set(error.clone());
-            Some(Arc::new(error))
-        } else {
-            None
-        };
-
-        let pid_sum_data = fd.pid_sum().map(|data| {
-            let _ = PID_SUM_CACHE.set(data.clone());
-            Arc::new(data)
-        });
-
         // TODO: unwrap
         let gyro_raw_ffts =
             FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
-                fd.gyro_unfiltered()
-                    .unwrap()
-                    .into_iter()
-                    .map(Some)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap()
+                match fd.gyro_unfiltered() {
+                    Some(data) => [Some(data[0]), Some(data[1]), Some(data[2])],
+                    None => [None, None, None]
+                }
             });
         let gyro_filtered_ffts =
             FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
-                fd.gyro_filtered()
-                    .unwrap()
-                    .into_iter()
-                    .map(Some)
-                    .collect::<Vec<_>>()
-                    .try_into()
-                    .unwrap()
+                match fd.gyro_filtered() {
+                    Some(data) => [Some(data[0]), Some(data[1]), Some(data[2])],
+                    None => [None, None, None]
+                }
             });
+
         // D-term pre-filter: try direct data first, then use calculated from gyro derivative
         let d_raw_direct = fd.d_unfiltered();
         let has_direct_d_raw = d_raw_direct.iter().any(|opt| opt.is_some());
-
-        if !has_direct_d_raw {
-            // Calculate D-term pre-filter from gyro derivative and cache it
-            if let Some(calculated) = fd.d_unfiltered_calculated() {
-                let _ = D_TERM_CALC_CACHE.set(calculated);
-            }
-        }
+        let has_calculated_d_raw = fd.d_unfiltered_calculated().is_some();
 
         let dterm_raw_ffts =
             FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
@@ -1548,9 +1512,10 @@ impl VibeTab {
                 if direct.iter().any(|opt| opt.is_some()) {
                     return direct;
                 }
-                // Fall back to calculated cache
-                match D_TERM_CALC_CACHE.get() {
-                    Some(data) => [Some(&data[0]), Some(&data[1]), Some(&data[2])],
+                
+                // Fall back to calculated (now pre-computed in FlightData)
+                match fd.d_unfiltered_calculated() {
+                    Some(data) => [Some(data[0]), Some(data[1]), Some(data[2])],
                     None => [None, None, None],
                 }
             });
@@ -1570,20 +1535,18 @@ impl VibeTab {
                 }
             });
 
-        // PID Error FFT - uses cached data
         let pid_error_ffts =
-            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |_fd: &FlightData| {
-                match PID_ERROR_CACHE.get() {
-                    Some(data) => [Some(&data[0]), Some(&data[1]), Some(&data[2])],
+            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
+                match fd.pid_error() {
+                    Some(e) => [Some(e[0]), Some(e[1]), Some(e[2])],
                     None => [None, None, None],
                 }
             });
 
-        // PID Sum FFT - uses cached data
         let pid_sum_ffts =
-            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |_fd: &FlightData| {
-                match PID_SUM_CACHE.get() {
-                    Some(data) => [Some(&data[0]), Some(&data[1]), Some(&data[2])],
+            FftVectorSeries::new(ctx, fft_settings.clone(), fd.clone(), |fd: &FlightData| {
+                match fd.pid_sum() {
+                    Some(s) => [Some(s[0]), Some(s[1]), Some(s[2])],
                     None => [None, None, None],
                 }
             });
@@ -1596,7 +1559,7 @@ impl VibeTab {
                 .map(|v| !v[0].is_empty())
                 .unwrap_or(false),
             gyro_filtered_enabled: true,
-            dterm_raw_enabled: has_direct_d_raw || D_TERM_CALC_CACHE.get().is_some(),
+            dterm_raw_enabled: has_direct_d_raw || has_calculated_d_raw,
             dterm_filtered_enabled: true,
             setpoint_enabled: false,
             pid_error_enabled: false,
@@ -1640,9 +1603,6 @@ impl VibeTab {
             setpoint_ffts,
             pid_error_ffts,
             pid_sum_ffts,
-
-            pid_error_data,
-            pid_sum_data,
 
             fd,
         }

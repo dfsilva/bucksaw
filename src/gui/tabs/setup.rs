@@ -1069,29 +1069,35 @@ impl SetupTab {
         ui.add_space(4.0);
 
         // Gyro Lowpass 2
+        let gyro_lpf2_enabled = headers
+            .get("gyro_lpf2_static_hz")
+            .map(|s| s != "0" && !s.is_empty())
+            .unwrap_or(false);
         ui.horizontal(|ui| {
-            Self::toggle_indicator(ui, true);
+            Self::toggle_indicator(ui, gyro_lpf2_enabled);
             ui.label("Gyro Lowpass 2");
         });
 
-        egui::Grid::new("gyro_lpf2_grid")
-            .num_columns(4)
-            .spacing([15.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Static Cutoff Frequency [Hz]");
-                Self::value_field(
-                    ui,
-                    headers
-                        .get("gyro_lpf2_static_hz")
-                        .map(|s| s.as_str())
-                        .unwrap_or("1000"),
-                );
-                ui.end_row();
+        if gyro_lpf2_enabled {
+            egui::Grid::new("gyro_lpf2_grid")
+                .num_columns(4)
+                .spacing([15.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Static Cutoff Frequency [Hz]");
+                    Self::value_field(
+                        ui,
+                        headers
+                            .get("gyro_lpf2_static_hz")
+                            .map(|s| s.as_str())
+                            .unwrap_or("0"),
+                    );
+                    ui.end_row();
 
-                ui.label("Filter Type");
-                ui.label(headers.get("gyro_lpf2_type").unwrap_or(&"PT1".to_string()));
-                ui.end_row();
-            });
+                    ui.label("Filter Type");
+                    ui.label(headers.get("gyro_lpf2_type").unwrap_or(&"PT1".to_string()));
+                    ui.end_row();
+                });
+        }
     }
 
     fn show_gyro_notch_filters(
@@ -1267,29 +1273,35 @@ impl SetupTab {
         ui.add_space(4.0);
 
         // D Term Lowpass 2
+        let dterm_lpf2_enabled = headers
+            .get("dterm_lpf2_static_hz")
+            .map(|s| s != "0" && !s.is_empty())
+            .unwrap_or(false);
         ui.horizontal(|ui| {
-            Self::toggle_indicator(ui, true);
+            Self::toggle_indicator(ui, dterm_lpf2_enabled);
             ui.label("D Term Lowpass 2");
         });
 
-        egui::Grid::new("dterm_lpf2_grid")
-            .num_columns(2)
-            .spacing([15.0, 4.0])
-            .show(ui, |ui| {
-                ui.label("Static Cutoff Frequency [Hz]");
-                Self::value_field(
-                    ui,
-                    headers
-                        .get("dterm_lpf2_static_hz")
-                        .map(|s| s.as_str())
-                        .unwrap_or(""),
-                );
-                ui.end_row();
+        if dterm_lpf2_enabled {
+            egui::Grid::new("dterm_lpf2_grid")
+                .num_columns(2)
+                .spacing([15.0, 4.0])
+                .show(ui, |ui| {
+                    ui.label("Static Cutoff Frequency [Hz]");
+                    Self::value_field(
+                        ui,
+                        headers
+                            .get("dterm_lpf2_static_hz")
+                            .map(|s| s.as_str())
+                            .unwrap_or("0"),
+                    );
+                    ui.end_row();
 
-                ui.label("Filter Type");
-                ui.label(headers.get("dterm_lpf2_type").unwrap_or(&"PT1".to_string()));
-                ui.end_row();
-            });
+                    ui.label("Filter Type");
+                    ui.label(headers.get("dterm_lpf2_type").unwrap_or(&"PT1".to_string()));
+                    ui.end_row();
+                });
+        }
     }
 
     fn show_dterm_notch_filter(

@@ -40,4 +40,11 @@ impl<C> BackgroundCompStore<C> {
             receiver,
         }
     }
+
+    pub fn take(&mut self) -> Option<C> {
+        if let Ok(data) = self.receiver.try_recv() {
+            self.data = Some(data);
+        }
+        self.data.take()
+    }
 }

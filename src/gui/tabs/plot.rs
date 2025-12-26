@@ -86,8 +86,6 @@ pub struct PlotTab {
     pid_sum_plot: TimeseriesPlotMemory<f64, f32>,
     d_unfilt_plot: TimeseriesPlotMemory<f64, f32>,
     debug_plot: TimeseriesPlotMemory<f64, f32>,
-    // Cached PID sum since it's computed, not just a reference
-    pid_sum_data: Option<[Vec<f32>; 3]>,
     fd: Arc<FlightData>,
     // Display settings
     smoothing: PlotSmoothingLevel,
@@ -96,9 +94,6 @@ pub struct PlotTab {
 
 impl PlotTab {
     pub fn new(fd: Arc<FlightData>) -> Self {
-        // Pre-compute PID sum
-        let pid_sum_data = fd.pid_sum();
-
         Self {
             gyro_plot: TimeseriesPlotMemory::new("gyro"),
             acc_plot: TimeseriesPlotMemory::new("acc"),
@@ -110,7 +105,6 @@ impl PlotTab {
             pid_sum_plot: TimeseriesPlotMemory::new("pid_sum"),
             d_unfilt_plot: TimeseriesPlotMemory::new("d_unfilt"),
             debug_plot: TimeseriesPlotMemory::new("debug"),
-            pid_sum_data,
             fd,
             smoothing: PlotSmoothingLevel::default(),
             line_width: 1.5,
@@ -379,7 +373,7 @@ impl PlotTab {
         ui.heading("PID Sum (P+I+D+F)");
         // Pre-compute smoothed PID sum data before the plot block
         let window = self.smoothing.window_size();
-        let pid_sum_smoothed: Option<[Vec<f32>; 3]> = self.pid_sum_data.as_ref().map(|pid_sum| {
+        let pid_sum_smoothed: Option<[Vec<f32>; 3]> = self.fd.pid_sum().map(|pid_sum| {
             [
                 apply_smoothing(pid_sum[0].iter().copied(), window),
                 apply_smoothing(pid_sum[1].iter().copied(), window),

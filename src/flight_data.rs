@@ -89,6 +89,82 @@ impl FlightData {
             i = (i + 1) % 1000;
         }
 
+        // ... (existing code for times and main_values loop) ...
+
+        progress_sender.send(0.95).unwrap(); // Almost done
+
+        // Pre-calculate derived metrics to avoid UI freeze
+        // Calculate sample rate for derivative calculations
+        let sample_rate = if times.len() > 100 {
+            const NUM_SAMPLES: usize = 100;
+            let mut samples: Vec<u32> = times
+                .windows(2)
+                .map(|w| ((w[1] - w[0]) * 1_000_000.0) as u32)
+                .take(NUM_SAMPLES)
+                .collect();
+            samples.sort();
+            let sample_interval = samples[NUM_SAMPLES / 2];
+            let rate = 1_000_000.0 / (sample_interval as f64);
+            (rate / 100.0).round() * 100.0
+        } else {
+            1000.0 // Fallback
+        };
+        let dt = 1.0 / sample_rate as f32;
+
+        // PID Sum
+        let mut pid_sum_values: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+        let has_pid = (0..3).all(|axis| {
+            main_values.contains_key(&format!("axisP[{}]", axis))
+                && main_values.contains_key(&format!("axisI[{}]", axis))
+        });
+
+        if has_pid {
+            let len = main_values["axisP[0]"].len();
+            for axis in 0..3 {
+                pid_sum_values[axis] = Vec::with_capacity(len);
+                let p = &main_values[&format!("axisP[{}]", axis)];
+                let i = &main_values[&format!("axisI[{}]", axis)];
+                let d = main_values.get(&format!("axisD[{}]", axis));
+                let f = main_values.get(&format!("axisF[{}]", axis));
+
+                for idx in 0..len {
+                    let p_val = p.get(idx).copied().unwrap_or(0.0);
+                    let i_val = i.get(idx).copied().unwrap_or(0.0);
+                    let d_val = d.and_then(|d| d.get(idx).copied()).unwrap_or(0.0);
+                    let f_val = f.and_then(|f| f.get(idx).copied()).unwrap_or(0.0);
+                    pid_sum_values[axis].push(p_val + i_val + d_val + f_val);
+                }
+                main_values.insert(format!("pid_sum[{}]", axis), pid_sum_values[axis].clone());
+            }
+        }
+
+        // PID Error (Setpoint - Gyro)
+        if main_values.contains_key("setpoint[0]") && main_values.contains_key("gyroADC[0]") {
+            let len = main_values["setpoint[0]"].len();
+            for axis in 0..3 {
+                let sp = &main_values[&format!("setpoint[{}]", axis)];
+                let gyro = &main_values[&format!("gyroADC[{}]", axis)];
+                let error: Vec<f32> = sp.iter().zip(gyro.iter()).map(|(s, g)| s - g).collect();
+                main_values.insert(format!("pid_error[{}]", axis), error);
+            }
+        }
+
+        // D-Term Calculated from Gyro
+        if main_values.contains_key("gyroADC[0]") {
+            for axis in 0..3 {
+                let gyro = &main_values[&format!("gyroADC[{}]", axis)];
+                // calculate_derivative logic inline or helper
+                if gyro.len() >= 2 {
+                    let mut result = Vec::with_capacity(gyro.len());
+                    result.push(0.0);
+                    for i in 1..gyro.len() {
+                        result.push((gyro[i] - gyro[i - 1]) / dt);
+                    }
+                    main_values.insert(format!("d_unfiltered_calculated[{}]", axis), result);
+                }
+            }
+        }
+
         progress_sender.send(1.0).unwrap();
 
         Ok(Self {
@@ -177,33 +253,13 @@ impl FlightData {
     }
 
     /// Calculate PID sum (P + I + D + F) for each axis
-    pub fn pid_sum(&self) -> Option<[Vec<f32>; 3]> {
-        let p = self.p()?;
-        let i = self.i()?;
-        let d = self.d();
-        let f = self.f();
+    pub fn pid_sum(&self) -> Option<[&Vec<f32>; 3]> {
+        self.get_vector_series("pid_sum")
+    }
 
-        let len = p[0].len();
-        let mut result: [Vec<f32>; 3] = [
-            Vec::with_capacity(len),
-            Vec::with_capacity(len),
-            Vec::with_capacity(len),
-        ];
-
-        for axis in 0..3 {
-            for idx in 0..len {
-                let p_val = p[axis].get(idx).copied().unwrap_or(0.0);
-                let i_val = i[axis].get(idx).copied().unwrap_or(0.0);
-                let d_val = d[axis].and_then(|d| d.get(idx).copied()).unwrap_or(0.0);
-                let f_val = f
-                    .as_ref()
-                    .and_then(|f| f[axis].get(idx).copied())
-                    .unwrap_or(0.0);
-                result[axis].push(p_val + i_val + d_val + f_val);
-            }
-        }
-
-        Some(result)
+    /// Get PID error (Setpoint - Gyro)
+    pub fn pid_error(&self) -> Option<[&Vec<f32>; 3]> {
+        self.get_vector_series("pid_error")
     }
 
     /// Get pre-filtered (raw) D-term if available
@@ -242,16 +298,8 @@ impl FlightData {
 
     /// Calculate D-term pre-filter from filtered gyro derivative
     /// This approximates what PIDToolbox shows as "Dterm prefilt"
-    pub fn d_unfiltered_calculated(&self) -> Option<[Vec<f32>; 3]> {
-        let gyro = self.gyro_filtered()?;
-        let sample_rate = self.sample_rate() as f32;
-        let dt = 1.0 / sample_rate;
-
-        Some([
-            Self::calculate_derivative(gyro[0], dt),
-            Self::calculate_derivative(gyro[1], dt),
-            Self::calculate_derivative(gyro[2], dt),
-        ])
+    pub fn d_unfiltered_calculated(&self) -> Option<[&Vec<f32>; 3]> {
+        self.get_vector_series("d_unfiltered_calculated")
     }
 
     /// Calculate the derivative of a signal (approximating D-term before filtering)

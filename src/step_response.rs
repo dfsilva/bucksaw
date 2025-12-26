@@ -68,7 +68,49 @@ impl std::fmt::Display for SmoothingLevel {
     }
 }
 
-/// Apply moving average smoothing to the data
+/// Apply LOWESS (Locally Weighted Scatterplot Smoothing) to the data
+/// This matches PIDtoolbox's smoothing approach for step response analysis
+fn apply_lowess_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
+    if window_size <= 1 || data.len() < window_size {
+        return data.to_vec();
+    }
+
+    let half_window = window_size / 2;
+    let mut smoothed = Vec::with_capacity(data.len());
+
+    for i in 0..data.len() {
+        let start = i.saturating_sub(half_window);
+        let end = (i + half_window + 1).min(data.len());
+        let window = &data[start..end];
+        
+        // LOWESS uses tricube weighting centered at the current point
+        let center = i as f32;
+        let max_dist = half_window as f32;
+        
+        let mut weighted_sum = 0.0f32;
+        let mut weight_sum = 0.0f32;
+        
+        for (j, &val) in window.iter().enumerate() {
+            let pos = (start + j) as f32;
+            let dist = (pos - center).abs() / (max_dist + 1.0);
+            // Tricube weight function: (1 - |d|^3)^3
+            let weight = if dist < 1.0 {
+                let t = 1.0 - dist.powi(3);
+                t.powi(3)
+            } else {
+                0.0
+            };
+            weighted_sum += val * weight;
+            weight_sum += weight;
+        }
+        
+        smoothed.push(if weight_sum > 0.0 { weighted_sum / weight_sum } else { data[i] });
+    }
+
+    smoothed
+}
+
+/// Apply simple moving average smoothing (fallback)
 fn apply_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
     if window_size <= 1 || data.len() < window_size {
         return data.to_vec();
@@ -86,6 +128,204 @@ fn apply_smoothing(data: &[f32], window_size: usize) -> Vec<f32> {
     }
 
     smoothed
+}
+
+// ========================================================================
+// Betaflight-style filter implementations for simulation and visualization
+// ========================================================================
+
+// PTn cutoff correction factors from Betaflight (to achieve -3dB at specified frequency)
+const CUTOFF_CORRECTION_PT2: f64 = 1.553773974;
+const CUTOFF_CORRECTION_PT3: f64 = 1.961459177;
+
+/// Betaflight-style PT1 (first-order lowpass) filter
+pub struct Pt1Filter {
+    state: f64,
+    k: f64,
+}
+
+impl Pt1Filter {
+    /// Create a new PT1 filter with given cutoff frequency and sample rate
+    pub fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
+        let dt = 1.0 / sample_rate;
+        let omega = 2.0 * std::f64::consts::PI * cutoff_hz * dt;
+        let k = omega / (omega + 1.0);
+        Self { state: 0.0, k }
+    }
+
+    /// Create from time constant (delay to reach 63.2% of step input) in ms
+    pub fn from_time_constant_ms(time_constant_ms: f64, sample_rate: f64) -> Self {
+        let dt = 1.0 / sample_rate;
+        let delay = time_constant_ms / 1000.0;
+        let k = if delay > 0.0 { dt / (dt + delay) } else { 1.0 };
+        Self { state: 0.0, k }
+    }
+
+    pub fn apply(&mut self, input: f64) -> f64 {
+        self.state = self.state + self.k * (input - self.state);
+        self.state
+    }
+
+    pub fn reset(&mut self) {
+        self.state = 0.0;
+    }
+}
+
+/// Betaflight-style PT2 (second-order lowpass) filter
+pub struct Pt2Filter {
+    state1: f64,
+    state: f64,
+    k: f64,
+}
+
+impl Pt2Filter {
+    /// Create a new PT2 filter with given cutoff frequency and sample rate
+    pub fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
+        let dt = 1.0 / sample_rate;
+        // Apply cutoff correction for -3dB at specified frequency
+        let omega = 2.0 * std::f64::consts::PI * cutoff_hz * CUTOFF_CORRECTION_PT2 * dt;
+        let k = omega / (omega + 1.0);
+        Self { state1: 0.0, state: 0.0, k }
+    }
+
+    /// Create from time constant (delay to reach 63.2% of step input) in ms
+    pub fn from_time_constant_ms(time_constant_ms: f64, sample_rate: f64) -> Self {
+        let dt = 1.0 / sample_rate;
+        let delay = time_constant_ms / 1000.0 * CUTOFF_CORRECTION_PT2;
+        let k = if delay > 0.0 { dt / (dt + delay) } else { 1.0 };
+        Self { state1: 0.0, state: 0.0, k }
+    }
+
+    pub fn apply(&mut self, input: f64) -> f64 {
+        self.state1 = self.state1 + self.k * (input - self.state1);
+        self.state = self.state + self.k * (self.state1 - self.state);
+        self.state
+    }
+
+    pub fn reset(&mut self) {
+        self.state1 = 0.0;
+        self.state = 0.0;
+    }
+}
+
+/// Betaflight-style PT3 (third-order lowpass) filter
+pub struct Pt3Filter {
+    state1: f64,
+    state2: f64,
+    state: f64,
+    k: f64,
+}
+
+impl Pt3Filter {
+    /// Create a new PT3 filter with given cutoff frequency and sample rate
+    pub fn new(cutoff_hz: f64, sample_rate: f64) -> Self {
+        let dt = 1.0 / sample_rate;
+        // Apply cutoff correction for -3dB at specified frequency
+        let omega = 2.0 * std::f64::consts::PI * cutoff_hz * CUTOFF_CORRECTION_PT3 * dt;
+        let k = omega / (omega + 1.0);
+        Self { state1: 0.0, state2: 0.0, state: 0.0, k }
+    }
+
+    pub fn apply(&mut self, input: f64) -> f64 {
+        self.state1 = self.state1 + self.k * (input - self.state1);
+        self.state2 = self.state2 + self.k * (self.state1 - self.state2);
+        self.state = self.state + self.k * (self.state2 - self.state);
+        self.state
+    }
+
+    pub fn reset(&mut self) {
+        self.state1 = 0.0;
+        self.state2 = 0.0;
+        self.state = 0.0;
+    }
+}
+
+/// Filter type matching Betaflight's filter options
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum FilterType {
+    #[default]
+    Pt1,
+    Pt2,
+    Pt3,
+}
+
+impl FilterType {
+    pub const ALL: [FilterType; 3] = [FilterType::Pt1, FilterType::Pt2, FilterType::Pt3];
+
+    /// Returns the phase delay in degrees at the cutoff frequency
+    pub fn phase_delay_at_cutoff(&self) -> f64 {
+        match self {
+            FilterType::Pt1 => 45.0,  // -45° at cutoff
+            FilterType::Pt2 => 90.0,  // -90° at cutoff
+            FilterType::Pt3 => 135.0, // -135° at cutoff
+        }
+    }
+    
+    /// Calculate phase delay in milliseconds at a given frequency
+    pub fn phase_delay_ms(&self, freq_hz: f64) -> f64 {
+        let phase_deg = self.phase_delay_at_cutoff();
+        // Phase delay = phase / (360 * frequency)
+        (phase_deg / 360.0) / freq_hz * 1000.0
+    }
+}
+
+impl std::fmt::Display for FilterType {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            FilterType::Pt1 => write!(f, "PT1 (1st order)"),
+            FilterType::Pt2 => write!(f, "PT2 (2nd order)"),
+            FilterType::Pt3 => write!(f, "PT3 (3rd order)"),
+        }
+    }
+}
+
+/// Generate an ideal step response for a given filter type and time constant
+/// Returns points as (time_ms, normalized_value)
+pub fn generate_ideal_step_response(
+    filter_type: FilterType,
+    time_constant_ms: f64,
+    max_time_ms: f64,
+    sample_rate: f64,
+) -> Vec<(f64, f64)> {
+    let num_samples = ((max_time_ms / 1000.0) * sample_rate) as usize;
+    let dt_ms = 1000.0 / sample_rate;
+    
+    let mut result = Vec::with_capacity(num_samples);
+    
+    match filter_type {
+        FilterType::Pt1 => {
+            // Analytical solution: y(t) = 1 - e^(-t/τ)
+            let tau = time_constant_ms;
+            for i in 0..=num_samples {
+                let t = i as f64 * dt_ms;
+                let y = 1.0 - (-t / tau).exp();
+                result.push((t, y));
+            }
+        }
+        FilterType::Pt2 => {
+            // Simulate PT2 response (cascaded PT1)
+            let mut filter = Pt2Filter::from_time_constant_ms(time_constant_ms, sample_rate);
+            for i in 0..=num_samples {
+                let t = i as f64 * dt_ms;
+                let y = filter.apply(1.0);
+                result.push((t, y));
+            }
+        }
+        FilterType::Pt3 => {
+            // Simulate PT3 response (cascaded PT1 x 3)
+            let mut filter = Pt3Filter::new(
+                1000.0 / (2.0 * std::f64::consts::PI * time_constant_ms),
+                sample_rate,
+            );
+            for i in 0..=num_samples {
+                let t = i as f64 * dt_ms;
+                let y = filter.apply(1.0);
+                result.push((t, y));
+            }
+        }
+    }
+    
+    result
 }
 
 /// Extracted metrics from a step response curve
@@ -118,7 +358,7 @@ impl StepResponseMetrics {
         let mut metrics = Self::default();
 
         // Find peak value and time
-        let (peak_time, peak_value) = response
+        let (peak_time, _peak_value) = response
             .iter()
             .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))
             .copied()
@@ -270,9 +510,9 @@ pub fn calculate_step_response(
         return vec![];
     }
 
-    // Apply smoothing to the step response (this is what PID Toolbox does)
+    // Apply LOWESS smoothing to the step response for better results (like PID Toolbox)
     let response_slice = &step_response[..response_len];
-    let smoothed_response = apply_smoothing(response_slice, smoothing.window_size());
+    let smoothed_response = apply_lowess_smoothing(response_slice, smoothing.window_size());
 
     // Normalize by steady-state value (average of last 30%)
     let steady_start = (response_len as f64 * 0.7) as usize;
