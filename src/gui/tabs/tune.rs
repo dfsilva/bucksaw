@@ -2,6 +2,7 @@ use std::sync::mpsc::{channel, Receiver, Sender};
 use std::sync::Arc;
 
 use egui_oszi::{TimeseriesGroup, TimeseriesLine, TimeseriesPlot, TimeseriesPlotMemory};
+use egui_phosphor::regular as icons;
 use egui_plot::{Corner, Legend, PlotPoints};
 
 use crate::analytics;
@@ -414,15 +415,15 @@ impl TuneTab {
             ui.separator();
 
             // Overlay mode toggle
-            ui.checkbox(&mut self.overlay_mode, "= Overlay")
+            ui.checkbox(&mut self.overlay_mode, &format!("{} Overlay", icons::STACK))
                 .on_hover_text("Compare all axes on a single plot");
 
             // Metrics panel toggle
-            ui.checkbox(&mut self.show_metrics, "# Metrics")
+            ui.checkbox(&mut self.show_metrics, &format!("{} Metrics", icons::CHART_BAR))
                 .on_hover_text("Show step response analysis metrics (rise time, overshoot, etc.)");
 
             // Ideal response controls
-            ui.checkbox(&mut self.show_ideal_response, "~ Ideal")
+            ui.checkbox(&mut self.show_ideal_response, &format!("{} Ideal", icons::WAVE_SINE))
                 .on_hover_text("Show ideal step response curve based on Betaflight filter models");
 
             if self.show_ideal_response {
@@ -590,7 +591,7 @@ impl TuneTab {
                         if self.show_metrics {
                             ui.add_space(8.0);
                             ui.separator();
-                            ui.heading("# Step Response Metrics");
+                            ui.heading(format!("{} Step Response Metrics", icons::CHART_BAR));
                             ui.add_space(4.0);
                             Self::show_metrics_panel(ui, step_responses);
                             
@@ -668,7 +669,7 @@ impl TuneTab {
 
         if !hints.is_empty() {
             ui.group(|ui| {
-                ui.label(egui::RichText::new("* Tuning Hints").strong());
+                ui.label(egui::RichText::new(format!("{} Tuning Hints", icons::LIGHTBULB)).strong());
                 for (hint, color) in hints {
                     ui.colored_label(color, hint);
                 }

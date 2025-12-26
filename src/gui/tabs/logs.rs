@@ -1,4 +1,5 @@
 use egui::{Color32, RichText, Ui};
+use egui_phosphor::regular as icons;
 
 use crate::analytics;
 use crate::app_logger::{logger, LogCategory, LogEntry, LogLevel};
@@ -67,7 +68,7 @@ impl LogsTab {
     }
 
     pub fn show(&mut self, ui: &mut Ui) {
-        ui.heading("= Application Logs");
+        ui.heading(format!("{} Application Logs", icons::LIST_BULLETS));
         ui.add_space(8.0);
 
         // Controls bar

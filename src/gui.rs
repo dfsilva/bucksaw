@@ -11,6 +11,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use egui::Layout;
+use egui_phosphor::regular as icons;
 use itertools::Itertools;
 
 use crate::analytics;
@@ -171,7 +172,7 @@ impl eframe::App for App {
                 ui.set_enabled(enabled);
                 ui.horizontal_centered(|ui| {
                     if ui
-                        .button(if self.left_panel_open { "<" } else { "=" })
+                        .button(if self.left_panel_open { icons::CARET_LEFT } else { icons::LIST })
                         .clicked()
                     {
                         self.left_panel_open = !self.left_panel_open;
@@ -180,8 +181,13 @@ impl eframe::App for App {
 
                     // TODO: right panel (ℹ)
 
+                    let open_label = if narrow {
+                        icons::FOLDER_OPEN.to_string()
+                    } else {
+                        format!("{} Open File", icons::FOLDER_OPEN)
+                    };
                     if ui
-                        .button(if narrow { "□" } else { "□ Open File" })
+                        .button(&open_label)
                         .clicked()
                     {
                         self.open_file_dialog = Some(OpenFileDialog::new(None));
@@ -253,20 +259,20 @@ impl eframe::App for App {
                                 ui.horizontal(|ui| {
                                     // Expand/collapse button
                                     let expand_icon =
-                                        if opened_file.expanded { "▼" } else { "▶" };
+                                        if opened_file.expanded { icons::CARET_DOWN } else { icons::CARET_RIGHT };
                                     if ui.small_button(expand_icon).clicked() {
                                         toggle_expand = Some(file_idx);
                                     }
 
                                     // File icon and name
-                                    ui.label("□");
+                                    ui.label(icons::FILE);
                                     ui.label(&opened_file.file_name);
 
                                     // Close button on the right
                                     ui.with_layout(
                                         Layout::right_to_left(egui::Align::Center),
                                         |ui| {
-                                            if ui.small_button("✕").clicked() {
+                                            if ui.small_button(icons::X).clicked() {
                                                 file_to_close = Some(file_idx);
                                             }
                                         },
@@ -299,9 +305,9 @@ impl eframe::App for App {
                                             ui.horizontal(|ui| {
                                                 // Flight indicator
                                                 if parse_result.is_ok() {
-                                                    ui.label("  ");
+                                                    ui.label(icons::AIRPLANE_TILT);
                                                 } else {
-                                                    ui.label("⚠");
+                                                    ui.label(icons::WARNING);
                                                 }
 
                                                 ui.label("Flight ");
@@ -311,7 +317,7 @@ impl eframe::App for App {
                                                     ui.with_layout(
                                                         Layout::right_to_left(egui::Align::Center),
                                                         |ui| {
-                                                            if ui.small_button("→").clicked() {
+                                                            if ui.small_button(icons::ARROW_RIGHT).clicked() {
                                                                 new_selection = Some(Selection {
                                                                     file_index: file_idx,
                                                                     flight_index: flight_idx,

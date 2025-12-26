@@ -1,4 +1,5 @@
 use egui::{Color32, RichText};
+use egui_phosphor::regular as icons;
 
 pub struct TuningGuideTab {
     current_step: usize,
@@ -70,7 +71,7 @@ impl TuningGuideTab {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.heading("> Betaflight Tuning Guide");
+        ui.heading(format!("{} Betaflight Tuning Guide", icons::BOOK_OPEN));
         ui.label("Follow this interactive workflow to get a locked-in tune.");
         ui.add_space(10.0);
 
@@ -109,7 +110,7 @@ impl TuningGuideTab {
                 ui.label(RichText::new(step.description).size(16.0));
                 ui.add_space(16.0);
 
-                ui.label(RichText::new("= Action Items:").strong());
+                ui.label(RichText::new(format!("{} Action Items:", icons::CHECK_SQUARE)).strong());
                 for item in step.action_items {
                     ui.horizontal(|ui| {
                         ui.label("•");

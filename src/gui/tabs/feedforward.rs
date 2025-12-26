@@ -1,5 +1,6 @@
 use crate::flight_data::FlightData;
 use egui::{Color32, RichText};
+use egui_phosphor::regular as icons;
 use egui_plot::{Legend, Line, Plot, PlotPoints};
 use std::sync::Arc;
 
@@ -84,7 +85,7 @@ impl FeedforwardTab {
     }
 
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        ui.heading("> Feedforward Analysis");
+        ui.heading(format!("{} Feedforward Analysis", icons::ARROW_FAT_RIGHT));
         ui.add_space(10.0);
 
         // Metrics Grid

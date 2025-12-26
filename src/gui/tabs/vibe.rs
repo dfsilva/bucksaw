@@ -3,6 +3,7 @@ use std::sync::mpsc::{channel, Receiver, TryRecvError};
 use std::sync::{Arc, OnceLock};
 
 use egui::Color32;
+use egui_phosphor::regular as icons;
 use itertools::Itertools;
 
 use crate::flight_data::FlightData;
@@ -1787,7 +1788,7 @@ impl VibeTab {
                     // Overlays
                     ui.checkbox(&mut self.show_rpm_harmonics, "RPM").on_hover_text("Show motor harmonics");
                     ui.checkbox(&mut self.show_peak_frequencies, "Peaks").on_hover_text("Show detected peaks");
-                    ui.menu_button("▼", |ui| {
+                    ui.menu_button(icons::CARET_DOWN, |ui| {
                         ui.label("Frequency Bands:");
                         for band in &mut self.frequency_bands {
                             ui.horizontal(|ui| {

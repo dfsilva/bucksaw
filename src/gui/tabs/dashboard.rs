@@ -4,6 +4,7 @@
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Ui};
+use egui_phosphor::regular as icons;
 
 use crate::flight_data::FlightData;
 use crate::gui::colors::Colors;
@@ -38,10 +39,10 @@ impl HealthLevel {
 
     fn icon(&self) -> &'static str {
         match self {
-            HealthLevel::Excellent => "✓",
-            HealthLevel::Good => "+",
-            HealthLevel::Warning => "⚠",
-            HealthLevel::Poor => "×",
+            HealthLevel::Excellent => icons::CHECK_CIRCLE,
+            HealthLevel::Good => icons::CHECK,
+            HealthLevel::Warning => icons::WARNING,
+            HealthLevel::Poor => icons::X_CIRCLE,
         }
     }
 }
@@ -318,7 +319,7 @@ impl DashboardTab {
         egui::ScrollArea::vertical().show(ui, |ui| {
             // Header with overall health
             ui.horizontal(|ui| {
-                ui.heading("# Flight Dashboard");
+                ui.heading(format!("{} Flight Dashboard", icons::SQUARES_FOUR));
                 ui.add_space(16.0);
                 ui.label(
                     RichText::new(format!(

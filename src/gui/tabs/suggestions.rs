@@ -2,6 +2,7 @@ use std::sync::mpsc::Receiver;
 use std::sync::Arc;
 
 use egui::{Color32, RichText, Ui};
+use egui_phosphor::regular as icons;
 
 use crate::ai_integration::{
     AIAnalysisResult, AIModel, AnalysisFocus, FlightMetrics, ModelFetchResult, OpenRouterClient,
@@ -30,9 +31,9 @@ impl Severity {
 
     fn icon(&self) -> &'static str {
         match self {
-            Severity::Info => "ℹ",
-            Severity::Warning => "⚠",
-            Severity::Critical => "●",
+            Severity::Info => icons::INFO,
+            Severity::Warning => icons::WARNING,
+            Severity::Critical => icons::X_CIRCLE,
         }
     }
 }
@@ -2039,7 +2040,7 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === QUICK ACTIONS PANEL ===
-            ui.label(RichText::new("# Quick Tuning Status").strong().size(16.0));
+            ui.label(RichText::new(format!("{} Quick Tuning Status", icons::GAUGE)).strong().size(16.0));
             ui.add_space(4.0);
 
             // Calculate status for each tuning area
@@ -2075,9 +2076,9 @@ impl SuggestionsTab {
 
             ui.add_space(4.0);
             ui.label(
-                RichText::new("● = Good  ○ = Needs Attention  ■ = Critical")
+                RichText::new(format!("{} = Good  {} = Needs Attention  {} = Critical", icons::CHECK_CIRCLE, icons::WARNING_CIRCLE, icons::X_CIRCLE))
                     .weak()
-                    .small(),
+                    .size(14.0),
             );
 
             ui.add_space(16.0);
@@ -2085,7 +2086,7 @@ impl SuggestionsTab {
             ui.add_space(8.0);
 
             // === RULE-BASED SUGGESTIONS ===
-            ui.label(RichText::new("= Automated Analysis").strong().size(16.0));
+            ui.label(RichText::new(format!("{} Automated Analysis", icons::ROBOT)).strong().size(16.0));
             ui.label("Based on analysis of your flight log, here are tuning recommendations:");
             ui.add_space(8.0);
 
@@ -2631,16 +2632,16 @@ impl SuggestionsTab {
     fn draw_status_indicator(&self, ui: &mut egui::Ui, label: &str, status: &Severity) {
         let (icon, color, tooltip) = match status {
             Severity::Critical => (
-                "■",
+                icons::X_CIRCLE,
                 egui::Color32::from_rgb(255, 80, 80),
                 "Critical issues found",
             ),
             Severity::Warning => (
-                "○",
+                icons::WARNING_CIRCLE,
                 egui::Color32::from_rgb(255, 200, 80),
                 "Needs attention",
             ),
-            Severity::Info => ("●", egui::Color32::from_rgb(80, 255, 80), "Looking good"),
+            Severity::Info => (icons::CHECK_CIRCLE, egui::Color32::from_rgb(80, 255, 80), "Looking good"),
         };
 
         let response = ui
