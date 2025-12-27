@@ -225,8 +225,8 @@ impl App {
                 }
             }
 
-            // Number keys 1-9: Switch tabs (when not in a text field)
-            if !i.modifiers.command && !i.modifiers.alt {
+            // Cmd/Ctrl + 1-9: Switch tabs
+            if i.modifiers.command {
                 let all_tabs = [
                     FlightViewTab::Dashboard,
                     FlightViewTab::Plot,
@@ -483,12 +483,6 @@ impl eframe::App for App {
                     ui.separator();
 
                     ui.with_layout(Layout::right_to_left(egui::Align::Center), |ui| {
-                        // GitHub link with tooltip
-                        ui.hyperlink_to(icons::GITHUB_LOGO, env!("CARGO_PKG_REPOSITORY"))
-                            .on_hover_text("View source on GitHub");
-
-                        ui.separator();
-
                         // Dark mode switch with tooltip
                         let dark_mode_btn = egui::widgets::global_dark_light_mode_switch(ui);
                         
@@ -510,7 +504,7 @@ impl eframe::App for App {
                                     let cmd = if cfg!(target_os = "macos") { "⌘" } else { "Ctrl+" };
                                     ui.label(format!("{}O", cmd)); ui.label("Open file"); ui.end_row();
                                     ui.label(format!("{}W", cmd)); ui.label("Close file"); ui.end_row();
-                                    ui.label("1-9"); ui.label("Switch tabs"); ui.end_row();
+                                    ui.label(format!("{}1-9", cmd)); ui.label("Switch tabs"); ui.end_row();
                                     ui.label(format!("{}[ / {}]", cmd, cmd)); ui.label("Previous/Next tab"); ui.end_row();
                                     ui.label("Esc"); ui.label("Close dialog"); ui.end_row();
                                 });

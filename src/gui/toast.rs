@@ -38,7 +38,7 @@ impl ToastKind {
 pub struct Toast {
     pub message: String,
     pub kind: ToastKind,
-    /// Time when the toast was created (in seconds since app start)
+    /// Time when the toast was created (egui time in seconds)
     pub created_at: f64,
     /// Duration to show the toast (in seconds)
     pub duration: f64,
@@ -63,7 +63,8 @@ impl Toast {
 /// Toast notification manager
 pub struct Toaster {
     toasts: VecDeque<Toast>,
-    start_time: std::time::Instant,
+    /// Pending toasts that need to have their created_at set
+    pending: Vec<Toast>,
 }
 
 impl Default for Toaster {
@@ -76,18 +77,13 @@ impl Toaster {
     pub fn new() -> Self {
         Self {
             toasts: VecDeque::new(),
-            start_time: std::time::Instant::now(),
+            pending: Vec::new(),
         }
     }
 
-    /// Add a new toast notification
-    pub fn add(&mut self, mut toast: Toast) {
-        toast.created_at = self.start_time.elapsed().as_secs_f64();
-        self.toasts.push_back(toast);
-        // Limit to 5 toasts max
-        while self.toasts.len() > 5 {
-            self.toasts.pop_front();
-        }
+    /// Add a new toast notification (will be assigned timestamp on next show())
+    pub fn add(&mut self, toast: Toast) {
+        self.pending.push(toast);
     }
 
     /// Add an info toast
@@ -112,7 +108,18 @@ impl Toaster {
 
     /// Show all active toasts. Call this at the end of your update() function.
     pub fn show(&mut self, ctx: &egui::Context) {
-        let current_time = self.start_time.elapsed().as_secs_f64();
+        // Get current time from egui (works on all platforms including WASM)
+        let current_time = ctx.input(|i| i.time);
+
+        // Process pending toasts
+        for mut toast in self.pending.drain(..) {
+            toast.created_at = current_time;
+            self.toasts.push_back(toast);
+            // Limit to 5 toasts max
+            while self.toasts.len() > 5 {
+                self.toasts.pop_front();
+            }
+        }
 
         // Remove expired toasts
         self.toasts

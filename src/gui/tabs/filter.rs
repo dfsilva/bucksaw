@@ -137,16 +137,55 @@ struct NoiseAnalysis {
     peak_frequencies: Vec<f32>,
     /// D-term noise RMS (per axis)
     dterm_noise_rms: [f32; 3],
+    
+    // === Frequency-band noise analysis (Betaflight-style) ===
+    // Separates noise into actionable frequency ranges
+    
+    /// Propwash noise (0-50Hz) - indicates propwash handling issues
+    /// High values suggest D-term tuning, I-term relax, or motor timing issues
+    propwash_noise_rms: [f32; 3],
+    
+    /// Motor noise (50-150Hz) - typical motor/ESC noise range
+    /// High values suggest RPM filter issues or motor/prop problems
+    motor_noise_rms: [f32; 3],
+    
+    /// Frame resonance noise (150-350Hz) - frame/arm resonance
+    /// High values suggest frame issues, loose parts, or notch filter tuning
+    resonance_noise_rms: [f32; 3],
+    
+    /// High-frequency noise (350Hz+) - bearing noise, electrical interference
+    /// High values suggest motor bearing issues or electrical noise
+    high_freq_noise_rms: [f32; 3],
+    
+    /// Dominant noise band per axis (0=propwash, 1=motor, 2=resonance, 3=high-freq)
+    dominant_band: [usize; 3],
 }
 
 impl NoiseAnalysis {
     fn compute(fd: &FlightData) -> Self {
         let mut result = Self::default();
+        let sample_rate = fd.sample_rate() as f32;
         
         // Calculate raw gyro noise
         if let Some(gyro_raw) = fd.gyro_unfiltered() {
             for (i, axis_data) in gyro_raw.iter().enumerate() {
                 result.raw_gyro_rms[i] = Self::calculate_noise_rms(axis_data);
+                
+                // Calculate frequency-band noise using FFT
+                let band_noise = Self::calculate_frequency_band_noise(axis_data, sample_rate);
+                result.propwash_noise_rms[i] = band_noise.0;
+                result.motor_noise_rms[i] = band_noise.1;
+                result.resonance_noise_rms[i] = band_noise.2;
+                result.high_freq_noise_rms[i] = band_noise.3;
+                
+                // Determine dominant noise band
+                let bands = [band_noise.0, band_noise.1, band_noise.2, band_noise.3];
+                result.dominant_band[i] = bands
+                    .iter()
+                    .enumerate()
+                    .max_by(|(_, a), (_, b)| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal))
+                    .map(|(idx, _)| idx)
+                    .unwrap_or(0);
             }
         }
         
@@ -200,7 +239,104 @@ impl NoiseAnalysis {
             0.0
         }
     }
+    
+    /// Calculate noise power in different frequency bands using FFT
+    /// Returns (propwash 0-50Hz, motor 50-150Hz, resonance 150-350Hz, high-freq 350Hz+)
+    fn calculate_frequency_band_noise(data: &[f32], sample_rate: f32) -> (f32, f32, f32, f32) {
+        use std::f32::consts::PI;
+        
+        // Use a reasonable FFT size (power of 2)
+        let fft_size = 1024.min(data.len().next_power_of_two());
+        if fft_size < 64 || data.len() < fft_size {
+            return (0.0, 0.0, 0.0, 0.0);
+        }
+        
+        // Take middle section of data and apply Hamming window
+        let start = (data.len() - fft_size) / 2;
+        let windowed: Vec<f32> = data[start..start + fft_size]
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let w = 0.54 - 0.46 * (2.0 * PI * i as f32 / (fft_size - 1) as f32).cos();
+                v * w
+            })
+            .collect();
+        
+        // Simple DFT for the frequency bins we care about (faster than full FFT for our needs)
+        let freq_resolution = sample_rate / fft_size as f32;
+        
+        // Define frequency band boundaries
+        let propwash_max_bin = (50.0 / freq_resolution) as usize;
+        let motor_max_bin = (150.0 / freq_resolution) as usize;
+        let resonance_max_bin = (350.0 / freq_resolution) as usize;
+        let nyquist_bin = fft_size / 2;
+        
+        // Calculate power in each band using Goertzel algorithm for efficiency
+        // (Only compute the bins we need)
+        let propwash_power = Self::calculate_band_power(&windowed, 1, propwash_max_bin.min(nyquist_bin));
+        let motor_power = Self::calculate_band_power(&windowed, propwash_max_bin + 1, motor_max_bin.min(nyquist_bin));
+        let resonance_power = Self::calculate_band_power(&windowed, motor_max_bin + 1, resonance_max_bin.min(nyquist_bin));
+        let high_freq_power = Self::calculate_band_power(&windowed, resonance_max_bin + 1, nyquist_bin);
+        
+        // Convert power to RMS
+        let propwash_rms = propwash_power.sqrt();
+        let motor_rms = motor_power.sqrt();
+        let resonance_rms = resonance_power.sqrt();
+        let high_freq_rms = high_freq_power.sqrt();
+        
+        (propwash_rms, motor_rms, resonance_rms, high_freq_rms)
+    }
+    
+    /// Calculate total power in a frequency band using simplified DFT
+    fn calculate_band_power(data: &[f32], start_bin: usize, end_bin: usize) -> f32 {
+        use std::f32::consts::PI;
+        
+        if start_bin >= end_bin || data.is_empty() {
+            return 0.0;
+        }
+        
+        let n = data.len() as f32;
+        let mut total_power = 0.0f32;
+        
+        for k in start_bin..=end_bin {
+            let mut real = 0.0f32;
+            let mut imag = 0.0f32;
+            let freq = 2.0 * PI * k as f32 / n;
+            
+            for (i, &x) in data.iter().enumerate() {
+                real += x * (freq * i as f32).cos();
+                imag -= x * (freq * i as f32).sin();
+            }
+            
+            total_power += (real * real + imag * imag) / n;
+        }
+        
+        total_power / (end_bin - start_bin + 1) as f32
+    }
+    
+    /// Get the name of the dominant noise band
+    fn dominant_band_name(band: usize) -> &'static str {
+        match band {
+            0 => "Propwash (0-50Hz)",
+            1 => "Motor (50-150Hz)",
+            2 => "Resonance (150-350Hz)",
+            3 => "High-freq (350Hz+)",
+            _ => "Unknown",
+        }
+    }
+    
+    /// Get a color for the noise band
+    fn band_color(band: usize) -> Color32 {
+        match band {
+            0 => Color32::from_rgb(100, 200, 255), // Blue - propwash
+            1 => Color32::from_rgb(255, 200, 100), // Orange - motor
+            2 => Color32::from_rgb(255, 100, 100), // Red - resonance
+            3 => Color32::from_rgb(200, 100, 255), // Purple - high-freq
+            _ => Color32::GRAY,
+        }
+    }
 }
+
 
 /// Filter effectiveness scoring with letter grades
 #[derive(Clone, Default)]

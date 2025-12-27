@@ -315,6 +315,7 @@ impl FftChunk {
     
     /// Find peaks in FFT spectrum using Betaflight's algorithm with parabolic interpolation
     /// Returns up to `max_peaks` peaks sorted by amplitude
+    /// Enhanced with Betaflight 4.3+ SDFT-style noise floor calculation
     pub fn find_peaks(
         fft: &[f32],
         sample_rate: f32,
@@ -329,35 +330,64 @@ impl FftChunk {
         let fft_size = (fft.len() + 1) * 2; // Reconstruct original FFT size
         let freq_resolution = sample_rate / fft_size as f32;
         
-        // Calculate noise floor (2x average PSD, like Betaflight)
-        let total_power: f32 = fft.iter().map(|&v| v * v).sum();
-        let noise_floor = (total_power / fft.len() as f32).sqrt() * 2.0;
-        
-        // Find local maxima that exceed noise floor
-        let mut peaks: Vec<(usize, f32)> = Vec::new();
-        
         let min_bin = ((min_freq_hz / freq_resolution) as usize).max(1);
         let max_bin = ((max_freq_hz / freq_resolution) as usize).min(fft.len() - 2);
         
+        // Step 1: Calculate initial noise floor (total power in analysis range)
+        // Betaflight uses power spectral density (squared magnitude)
+        let mut total_power: f32 = 0.0;
+        for i in min_bin..=max_bin {
+            total_power += fft[i] * fft[i];
+        }
+        
+        // Step 2: Find local maxima (peaks) - first pass
+        let mut preliminary_peaks: Vec<(usize, f32)> = Vec::new();
         for i in min_bin..=max_bin {
             let val = fft[i];
-            // Check if local maximum and above noise floor
-            if val > fft[i - 1] && val > fft[i + 1] && val > noise_floor {
-                peaks.push((i, val));
+            if val > fft[i - 1] && val > fft[i + 1] {
+                preliminary_peaks.push((i, val));
             }
         }
         
         // Sort by amplitude (descending) and take top N
-        peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-        peaks.truncate(max_peaks);
+        preliminary_peaks.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+        preliminary_peaks.truncate(max_peaks);
         
-        // Apply parabolic interpolation for sub-bin accuracy (Betaflight's method)
-        peaks.into_iter().map(|(bin, amp)| {
+        // Step 3: Subtract peak contributions from noise floor (Betaflight SDFT method)
+        // This gives a more accurate estimate of the actual noise floor
+        let mut adjusted_power = total_power;
+        for (bin, _) in &preliminary_peaks {
+            // Subtract peak bin and shoulder bins (with 0.75 weight for shoulders)
+            // This matches Betaflight's dyn_notch_filter.c STEP_CALC_FREQUENCIES
+            if *bin > min_bin && *bin < max_bin {
+                adjusted_power -= 0.75 * fft[bin - 1] * fft[bin - 1];
+                adjusted_power -= fft[*bin] * fft[*bin];
+                adjusted_power -= 0.75 * fft[bin + 1] * fft[bin + 1];
+            }
+        }
+        
+        // Noise floor = average power excluding peaks, then 2x threshold
+        let bin_count = (max_bin - min_bin + 1) as f32 - (preliminary_peaks.len() as f32);
+        let noise_floor = if bin_count > 0.0 && adjusted_power > 0.0 {
+            (adjusted_power / bin_count).sqrt() * 2.0
+        } else {
+            (total_power / (max_bin - min_bin + 1) as f32).sqrt() * 2.0
+        };
+        
+        // Step 4: Filter peaks that are above improved noise floor
+        let valid_peaks: Vec<_> = preliminary_peaks
+            .into_iter()
+            .filter(|(_, amp)| *amp > noise_floor)
+            .collect();
+        
+        // Step 5: Apply parabolic interpolation for sub-bin accuracy (Betaflight's method)
+        valid_peaks.into_iter().map(|(bin, amp)| {
             let y0 = fft[bin - 1];
             let y1 = fft[bin];
             let y2 = fft[bin + 1];
             
             // Parabolic interpolation: offset = (y0 - y2) / (2 * (y0 - 2*y1 + y2))
+            // This estimates the true peak position between bins
             let denom = 2.0 * (y0 - 2.0 * y1 + y2);
             let offset = if denom.abs() > 1e-10 {
                 (y0 - y2) / denom
@@ -375,6 +405,7 @@ impl FftChunk {
             }
         }).collect()
     }
+
 
     /// Get a cached FFT planner for the given size
     /// FFT planners are expensive to create, so we cache them per size
@@ -1642,42 +1673,115 @@ impl VibeTab {
         self.pid_sum_ffts
             .set_fft_settings(self.fft_settings.clone());
     }
-
     /// Get debug mode information from log headers
+    /// Enhanced with full Betaflight debug mode catalog and channel descriptions
     fn get_debug_mode_info(&self) -> Option<(String, String, egui::Color32)> {
         let debug_mode = self.fd.unknown_headers.get("debug_mode")?;
 
         let (description, color) = match debug_mode.to_uppercase().as_str() {
+            // === GYRO DEBUG MODES ===
             "GYRO_SCALED" | "GYRO" => (
-                "Shows pre vs post-filter gyro data. Compare raw gyro noise to filtered output to evaluate filter effectiveness.",
+                "Shows pre vs post-filter gyro data. [0]=raw roll, [1]=raw pitch, [2]=raw yaw, [3]=filtered roll",
                 egui::Color32::from_rgb(100, 200, 255)
             ),
+            "GYRO_RAW" => (
+                "Raw gyro ADC output before any scaling. [0-2]=raw X/Y/Z, [3]=temperature. Useful for sensor noise analysis.",
+                egui::Color32::from_rgb(255, 100, 100)
+            ),
+            "GYRO_SAMPLE" => (
+                "Gyro sample timing. [0]=sample time, [1]=filter time, [2]=PID time, [3]=total loop time",
+                egui::Color32::from_rgb(200, 200, 255)
+            ),
+            
+            // === FILTER DEBUG MODES ===
             "D_LPF" | "DTERM_FILTER" => (
-                "D-term filter debugging. Shows D-term before and after filtering - useful for optimizing D-term LPF settings.",
+                "D-term filter debug. [0]=D pre-filter, [1]=D post-filter, [2]=D final, [3]=cutoff Hz. Optimize D-term LPF.",
                 egui::Color32::from_rgb(255, 180, 100)
             ),
             "RPM_FILTER" => (
-                "RPM filter debugging. Shows motor harmonics and filter effectiveness at removing motor noise.",
+                "RPM filter debug. [0]=motor1 freq, [1]=motor2 freq, [2]=motor3 freq, [3]=motor4 freq (Hz)",
                 egui::Color32::from_rgb(100, 255, 180)
             ),
-            "DYNAMIC_FILTER" | "DYN_NOTCH" => (
-                "Dynamic notch filter tracking. Shows how the notch filters are following frame resonances.",
+            "DYNAMIC_FILTER" | "DYN_NOTCH" | "FFT" => (
+                "Dynamic notch filter. [0]=notch1 freq, [1]=notch2 freq, [2]=notch3 freq, [3]=selected axis",
                 egui::Color32::from_rgb(180, 100, 255)
             ),
-            "GYRO_RAW" => (
-                "Raw gyro output before any filtering. Useful for seeing all noise sources.",
-                egui::Color32::from_rgb(255, 100, 100)
+            "FFT_FREQ" => (
+                "FFT frequency tracking. [0]=peak1 freq, [1]=peak2 freq, [2]=peak3 freq, [3]=center freq",
+                egui::Color32::from_rgb(180, 100, 255)
             ),
-            "FEEDFORWARD" | "FF" => (
-                "Feedforward debugging. Shows feedforward contribution to overall PID output.",
+            "FFT_TIME" => (
+                "FFT processing time. [0]=update time µs, [1]=total time µs, [2]=fft bins, [3]=samples",
+                egui::Color32::from_rgb(150, 150, 200)
+            ),
+            
+            // === PID DEBUG MODES ===
+            "FEEDFORWARD" | "FF" | "FEEDFORWARD_LIMIT" => (
+                "Feedforward debug. [0]=FF roll, [1]=FF pitch, [2]=FF yaw, [3]=FF limit. Check FF contribution.",
                 egui::Color32::from_rgb(255, 255, 100)
             ),
-            "PIDLOOP" | "PID_LOOP" => (
-                "Full PID loop timing. Shows loop execution times for performance analysis.",
+            "ITERM_RELAX" => (
+                "I-term relax debug. [0]=setpoint HP, [1]=relax factor, [2]=I-term, [3]=accumulated I. Tune I-term relax.",
+                egui::Color32::from_rgb(100, 255, 255)
+            ),
+            "ANTI_GRAVITY" => (
+                "Anti-gravity debug. [0]=throttle derivative, [1]=AG boost, [2]=P gain, [3]=I boost. Tune anti-gravity.",
+                egui::Color32::from_rgb(255, 200, 100)
+            ),
+            "D_MAX" => (
+                "D-Max debug. [0]=D gain before, [1]=D gain after, [2]=setpoint rate, [3]=boost factor",
+                egui::Color32::from_rgb(255, 150, 100)
+            ),
+            "PIDLOOP" | "PID_LOOP" | "SCHEDULER" => (
+                "PID loop timing. [0]=cycle time µs, [1]=CPU load, [2]=late tasks, [3]=scheduler time",
                 egui::Color32::from_rgb(200, 200, 200)
             ),
+            
+            // === MOTOR DEBUG MODES ===
+            "DSHOT_RPM_TELEMETRY" | "DSHOT_RPM" => (
+                "DShot RPM telemetry. [0-3]=motor 1-4 eRPM. Verify RPM filter is receiving telemetry.",
+                egui::Color32::from_rgb(100, 255, 100)
+            ),
+            "MOTOR" => (
+                "Motor output debug. [0-3]=motor 1-4 output %. Check for saturation and differential.",
+                egui::Color32::from_rgb(100, 200, 100)
+            ),
+            
+            // === RC DEBUG MODES ===
+            "RC_INTERPOLATION" | "RC_SMOOTHING" | "RC_SMOOTHING_RATE" => (
+                "RC smoothing debug. [0]=raw setpoint, [1]=smoothed setpoint, [2]=derivative, [3]=auto factor",
+                egui::Color32::from_rgb(255, 200, 255)
+            ),
+            
+            // === SENSOR DEBUG MODES ===
+            "ATTITUDE" => (
+                "Attitude estimation. [0]=roll, [1]=pitch, [2]=yaw, [3]=heading. Check IMU fusion.",
+                egui::Color32::from_rgb(200, 255, 200)
+            ),
+            "ACC" | "ACCELEROMETER" => (
+                "Accelerometer debug. [0-2]=accel X/Y/Z, [3]=magnitude. Check for vibration issues.",
+                egui::Color32::from_rgb(255, 200, 200)
+            ),
+            "BARO" | "ALTITUDE" => (
+                "Barometer/altitude debug. [0]=raw pressure, [1]=temp, [2]=altitude, [3]=velocity",
+                egui::Color32::from_rgb(200, 200, 255)
+            ),
+            
+            // === MISC DEBUG MODES ===
+            "BATTERY" => (
+                "Battery monitoring. [0]=voltage, [1]=current, [2]=mAh used, [3]=sag compensation",
+                egui::Color32::from_rgb(255, 255, 100)
+            ),
+            "GPS" => (
+                "GPS debug. [0]=sat count, [1]=HDOP, [2]=speed, [3]=ground course",
+                egui::Color32::from_rgb(100, 200, 255)
+            ),
+            "NONE" | "0" => (
+                "Debug mode disabled. Enable a debug mode in CLI for specialized analysis.",
+                egui::Color32::from_rgb(100, 100, 100)
+            ),
             _ => (
-                "Debug data available. Check debug channels in log for specialized analysis.",
+                "Unknown debug mode. Debug channels may contain useful diagnostic data.",
                 egui::Color32::from_rgb(150, 150, 150)
             ),
         };

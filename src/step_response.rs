@@ -197,11 +197,16 @@ impl Pt2Filter {
     }
 
     /// Create from time constant (delay to reach 63.2% of step input) in ms
-    /// Note: Cutoff correction is NOT applied here since we're working with time constant directly
+    /// Note: Applies cutoff correction factor to match Betaflight's behavior
     pub fn from_time_constant_ms(time_constant_ms: f64, sample_rate: f64) -> Self {
         let dt = 1.0 / sample_rate;
         let delay = time_constant_ms / 1000.0;
-        let k = if delay > 0.0 { dt / (dt + delay) } else { 1.0 };
+        // Apply cutoff correction factor like Betaflight's pt2FilterGainFromDelay
+        let k = if delay > 0.0 {
+            dt / (dt + delay * CUTOFF_CORRECTION_PT2)
+        } else {
+            1.0
+        };
         Self {
             state1: 0.0,
             state: 0.0,
@@ -255,6 +260,358 @@ impl Pt3Filter {
         self.state1 = 0.0;
         self.state2 = 0.0;
         self.state = 0.0;
+    }
+
+    /// Create from time constant (delay to reach 63.2% of step input) in ms
+    /// Note: Applies cutoff correction factor to match Betaflight's behavior
+    pub fn from_time_constant_ms(time_constant_ms: f64, sample_rate: f64) -> Self {
+        let dt = 1.0 / sample_rate;
+        let delay = time_constant_ms / 1000.0;
+        // Apply cutoff correction factor like Betaflight's pt3FilterGainFromDelay
+        let k = if delay > 0.0 {
+            dt / (dt + delay * CUTOFF_CORRECTION_PT3)
+        } else {
+            1.0
+        };
+        Self {
+            state1: 0.0,
+            state2: 0.0,
+            state: 0.0,
+            k,
+        }
+    }
+}
+
+// ========================================================================
+// Betaflight-style Biquad filter implementation
+// Supports LPF (Butterworth), Notch, and Bandpass filter types
+// Reference: betaflight/src/main/common/filter.c
+// ========================================================================
+
+/// Biquad filter type matching Betaflight's biquadFilterType_e
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum BiquadFilterType {
+    /// 2nd order Butterworth lowpass filter
+    #[default]
+    Lpf,
+    /// Notch (band-reject) filter
+    Notch,
+    /// Bandpass filter
+    Bpf,
+}
+
+/// Quality factor for 2nd order Butterworth filter: 1 / sqrt(2)
+const BIQUAD_Q_BUTTERWORTH: f64 = 0.7071067811865475; // 1.0 / sqrt(2.0)
+
+/// Betaflight-style Biquad filter (second-order IIR)
+/// Implements Direct Form 1 and Direct Form 2 apply methods
+#[derive(Clone, Debug)]
+pub struct BiquadFilter {
+    // Filter coefficients
+    b0: f64,
+    b1: f64,
+    b2: f64,
+    a1: f64,
+    a2: f64,
+    // Filter state (for DF1)
+    x1: f64,
+    x2: f64,
+    y1: f64,
+    y2: f64,
+    // Weight for crossfading (used in dynamic filters)
+    weight: f64,
+}
+
+impl Default for BiquadFilter {
+    fn default() -> Self {
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            b2: 0.0,
+            a1: 0.0,
+            a2: 0.0,
+            x1: 0.0,
+            x2: 0.0,
+            y1: 0.0,
+            y2: 0.0,
+            weight: 1.0,
+        }
+    }
+}
+
+impl BiquadFilter {
+    /// Create a new Butterworth lowpass filter (Q = 1/sqrt(2))
+    pub fn new_lpf(filter_freq_hz: f64, sample_rate: f64) -> Self {
+        Self::new(
+            filter_freq_hz,
+            sample_rate,
+            BIQUAD_Q_BUTTERWORTH,
+            BiquadFilterType::Lpf,
+            1.0,
+        )
+    }
+
+    /// Create a new notch filter with specified Q factor
+    /// Higher Q = narrower notch, lower Q = wider notch
+    pub fn new_notch(center_freq_hz: f64, sample_rate: f64, q: f64) -> Self {
+        Self::new(center_freq_hz, sample_rate, q, BiquadFilterType::Notch, 1.0)
+    }
+
+    /// Create a new bandpass filter with specified Q factor
+    pub fn new_bpf(center_freq_hz: f64, sample_rate: f64, q: f64) -> Self {
+        Self::new(center_freq_hz, sample_rate, q, BiquadFilterType::Bpf, 1.0)
+    }
+
+    /// Calculate notch filter Q given center frequency (f0) and lower cutoff frequency (f1)
+    /// Q = f0 / (f2 - f1); f2 = f0^2 / f1
+    /// Matches Betaflight's filterGetNotchQ()
+    pub fn get_notch_q(center_freq: f64, cutoff_freq: f64) -> f64 {
+        center_freq * cutoff_freq / (center_freq * center_freq - cutoff_freq * cutoff_freq)
+    }
+
+    /// Create a new biquad filter with full parameter control
+    /// Matches Betaflight's biquadFilterInit()
+    pub fn new(
+        filter_freq_hz: f64,
+        sample_rate: f64,
+        q: f64,
+        filter_type: BiquadFilterType,
+        weight: f64,
+    ) -> Self {
+        let mut filter = Self::default();
+        filter.update(filter_freq_hz, sample_rate, q, filter_type, weight);
+        filter
+    }
+
+    /// Update filter coefficients (for dynamic filters)
+    /// Matches Betaflight's biquadFilterUpdate()
+    pub fn update(
+        &mut self,
+        filter_freq_hz: f64,
+        sample_rate: f64,
+        q: f64,
+        filter_type: BiquadFilterType,
+        weight: f64,
+    ) {
+        let dt = 1.0 / sample_rate;
+        let omega = 2.0 * std::f64::consts::PI * filter_freq_hz * dt;
+        let sn = omega.sin();
+        let cs = omega.cos();
+        let alpha = sn / (2.0 * q);
+
+        match filter_type {
+            BiquadFilterType::Lpf => {
+                // 2nd order Butterworth lowpass
+                self.b1 = 1.0 - cs;
+                self.b0 = self.b1 * 0.5;
+                self.b2 = self.b0;
+                self.a1 = -2.0 * cs;
+                self.a2 = 1.0 - alpha;
+            }
+            BiquadFilterType::Notch => {
+                self.b0 = 1.0;
+                self.b1 = -2.0 * cs;
+                self.b2 = 1.0;
+                self.a1 = self.b1;
+                self.a2 = 1.0 - alpha;
+            }
+            BiquadFilterType::Bpf => {
+                self.b0 = alpha;
+                self.b1 = 0.0;
+                self.b2 = -alpha;
+                self.a1 = -2.0 * cs;
+                self.a2 = 1.0 - alpha;
+            }
+        }
+
+        let a0 = 1.0 + alpha;
+
+        // Precompute the coefficients (normalize by a0)
+        self.b0 /= a0;
+        self.b1 /= a0;
+        self.b2 /= a0;
+        self.a1 /= a0;
+        self.a2 /= a0;
+
+        self.weight = weight;
+    }
+
+    /// Apply filter using Direct Form 1 (works with dynamic coefficient changes)
+    /// Matches Betaflight's biquadFilterApplyDF1()
+    pub fn apply_df1(&mut self, input: f64) -> f64 {
+        let result = self.b0 * input + self.b1 * self.x1 + self.b2 * self.x2
+            - self.a1 * self.y1
+            - self.a2 * self.y2;
+
+        // Shift x1 to x2, input to x1
+        self.x2 = self.x1;
+        self.x1 = input;
+
+        // Shift y1 to y2, result to y1
+        self.y2 = self.y1;
+        self.y1 = result;
+
+        result
+    }
+
+    /// Apply filter using Direct Form 1 with weight crossfading
+    /// Matches Betaflight's biquadFilterApplyDF1Weighted()
+    pub fn apply_df1_weighted(&mut self, input: f64) -> f64 {
+        let result = self.apply_df1(input);
+        // Crossfading of input and output to turn filter on/off gradually
+        self.weight * result + (1.0 - self.weight) * input
+    }
+
+    /// Apply filter using Direct Form 2 (higher precision but can't handle coefficient changes)
+    /// Matches Betaflight's biquadFilterApply()
+    pub fn apply(&mut self, input: f64) -> f64 {
+        let result = self.b0 * input + self.x1;
+        self.x1 = self.b1 * input - self.a1 * result + self.x2;
+        self.x2 = self.b2 * input - self.a2 * result;
+        result
+    }
+
+    /// Reset filter state
+    pub fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.x2 = 0.0;
+        self.y1 = 0.0;
+        self.y2 = 0.0;
+    }
+
+    /// Get the current weight (for debugging/display)
+    pub fn weight(&self) -> f64 {
+        self.weight
+    }
+
+    /// Set the weight for crossfading
+    pub fn set_weight(&mut self, weight: f64) {
+        self.weight = weight;
+    }
+}
+
+// ========================================================================
+// Betaflight-style Phase Compensator (Lead-Lag filter)
+// Used to reduce latency by adding phase lead at the cost of amplifying noise
+// Reference: betaflight/src/main/common/filter.c - phaseCompInit/phaseCompApply
+// ========================================================================
+
+/// Phase Compensator filter (lead-lag filter)
+/// Can add phase lead to reduce latency, typically used on D-term
+/// Trades off latency reduction for noise amplification
+#[derive(Clone, Debug)]
+pub struct PhaseCompensator {
+    // Filter coefficients
+    b0: f64,
+    b1: f64,
+    a1: f64,
+    // Filter state
+    x1: f64,
+    y1: f64,
+    // Configuration
+    center_freq_hz: f64,
+    phase_shift_deg: f64,
+}
+
+impl Default for PhaseCompensator {
+    fn default() -> Self {
+        Self {
+            b0: 1.0,
+            b1: 0.0,
+            a1: 0.0,
+            x1: 0.0,
+            y1: 0.0,
+            center_freq_hz: 0.0,
+            phase_shift_deg: 0.0,
+        }
+    }
+}
+
+impl PhaseCompensator {
+    /// Create a new phase compensator
+    /// center_freq_hz: Frequency at which the specified phase shift occurs
+    /// phase_shift_deg: Phase shift in degrees at center frequency (positive = lead, negative = lag)
+    /// sample_rate: Sample rate in Hz
+    ///
+    /// Matches Betaflight's phaseCompInit()
+    pub fn new(center_freq_hz: f64, phase_shift_deg: f64, sample_rate: f64) -> Self {
+        let mut filter = Self::default();
+        filter.update(center_freq_hz, phase_shift_deg, sample_rate);
+        filter
+    }
+
+    /// Update filter coefficients (for dynamic filters)
+    pub fn update(&mut self, center_freq_hz: f64, phase_shift_deg: f64, sample_rate: f64) {
+        self.center_freq_hz = center_freq_hz;
+        self.phase_shift_deg = phase_shift_deg;
+
+        let dt = 1.0 / sample_rate;
+        let omega = 2.0 * std::f64::consts::PI * center_freq_hz * dt;
+
+        // Convert phase shift to radians
+        let phase_rad = phase_shift_deg * std::f64::consts::PI / 180.0;
+
+        // Calculate the gain factor based on phase shift
+        // For phase lead: gain > 1, for phase lag: gain < 1
+        let sn = phase_rad.sin();
+        let gain = if sn.abs() < 0.99 {
+            (1.0 + sn) / (1.0 - sn)
+        } else {
+            // Clamp for extreme phase shifts
+            100.0
+        };
+
+        // First-order lead-lag filter coefficients
+        // H(s) = (s + z) / (s + p) where z/p = gain
+        let tau = 1.0 / (2.0 * std::f64::consts::PI * center_freq_hz);
+        let tau_lead = tau / gain.sqrt();
+        let tau_lag = tau * gain.sqrt();
+
+        // Bilinear transform coefficients
+        let alpha_lead = 2.0 * tau_lead / dt;
+        let alpha_lag = 2.0 * tau_lag / dt;
+
+        self.b0 = (1.0 + alpha_lead) / (1.0 + alpha_lag);
+        self.b1 = (1.0 - alpha_lead) / (1.0 + alpha_lag);
+        self.a1 = (1.0 - alpha_lag) / (1.0 + alpha_lag);
+    }
+
+    /// Apply the phase compensator filter
+    /// Matches Betaflight's phaseCompApply()
+    pub fn apply(&mut self, input: f64) -> f64 {
+        let output = self.b0 * input + self.b1 * self.x1 + self.a1 * self.y1;
+
+        self.x1 = input;
+        self.y1 = output;
+
+        output
+    }
+
+    /// Reset filter state
+    pub fn reset(&mut self) {
+        self.x1 = 0.0;
+        self.y1 = 0.0;
+    }
+
+    /// Get the center frequency
+    pub fn center_freq(&self) -> f64 {
+        self.center_freq_hz
+    }
+
+    /// Get the phase shift in degrees
+    pub fn phase_shift(&self) -> f64 {
+        self.phase_shift_deg
+    }
+
+    /// Estimate the latency reduction at the center frequency in milliseconds
+    pub fn latency_reduction_ms(&self) -> f64 {
+        // Phase lead in degrees converts to time at frequency
+        // time = phase_deg / (360 * freq)
+        if self.center_freq_hz > 0.0 {
+            self.phase_shift_deg / (360.0 * self.center_freq_hz) * 1000.0
+        } else {
+            0.0
+        }
     }
 }
 

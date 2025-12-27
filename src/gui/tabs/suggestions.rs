@@ -117,6 +117,45 @@ struct AnalysisResults {
     setpoint_jitter: f32,  // Average high-freq noise in setpoint (indicates RC link issues)
     max_stick_rate: [f32; 3], // Maximum observed stick rate per axis (deg/s²)
     ff_delay_compensation: f32, // Estimated delay being compensated by FF (ms)
+
+    // === TPA (Throttle PID Attenuation) Analysis - Betaflight-style ===
+    // Analyzes how D-term noise and tracking error varies with throttle
+    // to suggest optimal TPA settings
+    /// D-term noise at different throttle levels [low, mid, high]
+    dterm_noise_by_throttle: [f32; 3],
+    /// Ratio of high-throttle D-term noise to low-throttle (indicates TPA need)
+    high_throttle_noise_ratio: f32,
+    /// Tracking error ratio at high throttle vs low (indicates over-attenuation)
+    high_throttle_error_ratio: f32,
+    /// Suggested TPA mode based on analysis (0=D only, 1=PD)
+    suggested_tpa_mode: u8,
+    /// Suggested TPA rate (0-100)
+    suggested_tpa_rate: f32,
+    /// Suggested TPA breakpoint
+    suggested_tpa_breakpoint: f32,
+
+    // === Enhanced Feedforward Analysis - Betaflight-style ===
+    // More detailed FF performance metrics
+    /// FF anticipation score: how often gyro starts moving before/with setpoint
+    /// 100 = perfect anticipation, 0 = always lagging
+    ff_anticipation_score: f32,
+    /// Number of rapid stick transition events analyzed
+    ff_transition_count: usize,
+    /// Average gyro response delay to setpoint changes (negative = anticipating)
+    ff_response_delay_ms: f32,
+    /// Suggested feedforward boost amount
+    suggested_ff_boost: f32,
+
+    // === Thrust Linearization Analysis (Betaflight-style) ===
+    // Analyzes motor response curve to detect non-linearity and suggest compensation
+    /// Motor output non-linearity score (0 = linear, higher = more non-linear)
+    motor_nonlinearity_score: f32,
+    /// Correlation between throttle and tracking error (higher = throttle-dependent issues)
+    throttle_error_correlation: f32,
+    /// Suggested thrust linearization value (0-150)
+    suggested_thrust_linear: f32,
+    /// Motor response at different throttle bands [low, mid, high]
+    motor_response_by_throttle: [f32; 3],
 }
 
 impl AnalysisResults {
@@ -753,7 +792,174 @@ impl AnalysisResults {
             };
         }
 
-        Self {
+        // === TPA ANALYSIS (Betaflight-style) ===
+        // Analyze D-term noise at different throttle levels to suggest optimal TPA settings
+        let mut dterm_noise_by_throttle = [0.0f32; 3];
+        let mut high_throttle_noise_ratio = 1.0f32;
+        let mut high_throttle_error_ratio = 1.0f32;
+        let mut suggested_tpa_mode = 0u8; // 0 = D-only (default)
+        let mut suggested_tpa_rate = 65.0f32; // Betaflight default
+        let mut suggested_tpa_breakpoint = 1350.0f32;
+
+        // Calculate D-term noise by throttle band
+        let d_terms = fd.d();
+        if !throttle_values.is_empty() {
+            for axis in 0..2 {
+                // Roll and Pitch only for D-term
+                if let Some(d_data) = d_terms[axis] {
+                    if d_data.len() > 10 {
+                        // Calculate D-term noise at each throttle band
+                        let mut band_samples: [Vec<f32>; 3] = [Vec::new(), Vec::new(), Vec::new()];
+
+                        let window = 5;
+                        for i in window..d_data.len().saturating_sub(window) {
+                            if i < throttle_values.len() {
+                                let t = throttle_values[i];
+                                let avg: f32 = d_data
+                                    [i.saturating_sub(window)..=(i + window).min(d_data.len() - 1)]
+                                    .iter()
+                                    .sum::<f32>()
+                                    / (2 * window + 1) as f32;
+                                let noise = (d_data[i] - avg).abs();
+
+                                if t < 30.0 {
+                                    band_samples[0].push(noise);
+                                } else if t < 70.0 {
+                                    band_samples[1].push(noise);
+                                } else {
+                                    band_samples[2].push(noise);
+                                }
+                            }
+                        }
+
+                        // Calculate RMS for each band
+                        for band in 0..3 {
+                            if !band_samples[band].is_empty() {
+                                let sum_sq: f32 = band_samples[band].iter().map(|x| x * x).sum();
+                                let rms = (sum_sq / band_samples[band].len() as f32).sqrt();
+                                dterm_noise_by_throttle[band] += rms / 2.0; // Average across axes
+                            }
+                        }
+                    }
+                }
+            }
+
+            // Calculate noise ratio (high vs low throttle)
+            if dterm_noise_by_throttle[0] > 0.1 {
+                high_throttle_noise_ratio = dterm_noise_by_throttle[2] / dterm_noise_by_throttle[0];
+            }
+
+            // Calculate tracking error ratio
+            let low_error_avg =
+                (tracking_error_by_throttle[0][0] + tracking_error_by_throttle[1][0]) / 2.0;
+            let high_error_avg =
+                (tracking_error_by_throttle[0][2] + tracking_error_by_throttle[1][2]) / 2.0;
+            if low_error_avg > 0.1 {
+                high_throttle_error_ratio = high_error_avg / low_error_avg;
+            }
+
+            // Suggest TPA settings based on analysis
+            // High noise ratio = need more TPA, high error ratio = TPA too aggressive
+            if high_throttle_noise_ratio > 2.0 {
+                // D-term noise increases significantly at high throttle - need TPA
+                suggested_tpa_rate =
+                    (50.0 + (high_throttle_noise_ratio - 1.0) * 15.0).clamp(50.0, 90.0);
+                suggested_tpa_breakpoint = 1250.0; // Start TPA earlier
+            } else if high_throttle_noise_ratio > 1.5 {
+                suggested_tpa_rate = 65.0;
+                suggested_tpa_breakpoint = 1350.0;
+            } else if high_throttle_noise_ratio < 1.2 {
+                // Noise doesn't increase much - can reduce TPA
+                suggested_tpa_rate = 40.0;
+                suggested_tpa_breakpoint = 1450.0;
+            }
+
+            // Check if P-term attenuation would help (high tracking error at high throttle)
+            if high_throttle_error_ratio > 1.5 && high_throttle_noise_ratio < 1.5 {
+                // Error increases but not noise - TPA might be over-attenuating
+                suggested_tpa_rate = (suggested_tpa_rate * 0.7).max(30.0);
+            } else if high_throttle_noise_ratio > 2.5 {
+                // Very high noise - consider PD mode
+                suggested_tpa_mode = 1; // PD mode
+            }
+        }
+
+        // === ENHANCED FEEDFORWARD ANALYSIS ===
+        let mut ff_anticipation_score = 50.0f32;
+        let mut ff_transition_count = 0usize;
+        let mut ff_response_delay_ms = 0.0f32;
+        let mut suggested_ff_boost = 0.0f32;
+
+        if let (Some(setpoint), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
+            let sample_rate = fd.sample_rate();
+            let ms_per_sample = 1000.0 / sample_rate as f32;
+            let transition_threshold = 100.0; // deg/s change to count as transition
+            let mut anticipating_count = 0;
+            let mut total_delay_samples = 0.0f32;
+            let mut total_transitions = 0;
+
+            for axis in 0..3 {
+                let len = setpoint[axis].len().min(gyro[axis].len());
+                if len < 20 {
+                    continue;
+                }
+
+                // Look for rapid setpoint changes
+                for i in 10..len.saturating_sub(10) {
+                    let sp_before = setpoint[axis][i.saturating_sub(5)];
+                    let sp_now = setpoint[axis][i];
+                    let sp_change = (sp_now - sp_before).abs();
+
+                    if sp_change > transition_threshold {
+                        total_transitions += 1;
+
+                        // Find when gyro starts responding (within +/- 5 samples window)
+                        let gyro_before = gyro[axis][i.saturating_sub(5)];
+                        let expected_dir = if sp_now > sp_before { 1.0 } else { -1.0 };
+
+                        let mut response_sample = 0i32;
+                        for offset in -5i32..=10 {
+                            let check_idx = (i as i32 + offset).max(0) as usize;
+                            if check_idx < gyro[axis].len() {
+                                let gyro_change =
+                                    (gyro[axis][check_idx] - gyro_before) * expected_dir;
+                                if gyro_change > sp_change * 0.3 {
+                                    // Gyro moved 30% of setpoint change
+                                    response_sample = offset;
+                                    break;
+                                }
+                            }
+                        }
+
+                        total_delay_samples += response_sample as f32;
+                        if response_sample <= 1 {
+                            // Gyro responded at same time or before setpoint
+                            anticipating_count += 1;
+                        }
+                    }
+                }
+            }
+
+            ff_transition_count = total_transitions;
+            if total_transitions > 5 {
+                ff_anticipation_score = (anticipating_count as f32 / total_transitions as f32
+                    * 100.0)
+                    .clamp(0.0, 100.0);
+                ff_response_delay_ms =
+                    (total_delay_samples / total_transitions as f32) * ms_per_sample;
+
+                // Suggest FF boost if gyro is lagging
+                if ff_response_delay_ms > 1.0 {
+                    // Gyro lags by >1ms on average
+                    suggested_ff_boost = (ff_response_delay_ms * 5.0).clamp(0.0, 30.0);
+                } else if ff_anticipation_score > 80.0 && ff_response_delay_ms < 0.0 {
+                    // Already good anticipation, might reduce FF
+                    suggested_ff_boost = -10.0;
+                }
+            }
+        }
+
+        let mut result = Self {
             step_overshoot,
             step_undershoot,
             step_settling_time,
@@ -777,15 +983,15 @@ impl AnalysisResults {
             // Throttle-segmented tracking
             tracking_error_by_throttle,
             worst_throttle_band,
-            // New propwash analysis
+            // Propwash analysis
             propwash_severity,
             propwash_events,
             propwash_worst_axis,
             propwash_avg_oscillation,
-            // New lag analysis
+            // Lag analysis
             system_latency_ms,
             avg_latency_ms,
-            // New I-term analysis
+            // I-term analysis
             iterm_windup_events,
             iterm_drift,
             // Motor balance analysis
@@ -799,7 +1005,127 @@ impl AnalysisResults {
             setpoint_jitter,
             max_stick_rate,
             ff_delay_compensation,
+            // TPA analysis
+            dterm_noise_by_throttle,
+            high_throttle_noise_ratio,
+            high_throttle_error_ratio,
+            suggested_tpa_mode,
+            suggested_tpa_rate,
+            suggested_tpa_breakpoint,
+            // Enhanced feedforward analysis
+            ff_anticipation_score,
+            ff_transition_count,
+            ff_response_delay_ms,
+            suggested_ff_boost,
+            // Thrust linearization analysis (computed below)
+            motor_nonlinearity_score: 0.0,
+            throttle_error_correlation: 0.0,
+            suggested_thrust_linear: 0.0,
+            motor_response_by_throttle: [0.0; 3],
+        };
+
+        // === THRUST LINEARIZATION ANALYSIS ===
+        // Analyze motor response curve to detect non-linearity
+        if !throttle_values.is_empty() {
+            // Calculate tracking error correlation with throttle
+            let mut throttle_sum = 0.0f32;
+            let mut error_sum = 0.0f32;
+            let mut throttle_error_sum = 0.0f32;
+            let mut throttle_sq_sum = 0.0f32;
+            let mut error_sq_sum = 0.0f32;
+            let mut count = 0usize;
+
+            // Also track error at each throttle band
+            let mut band_error_sum = [0.0f32; 3];
+            let mut band_count = [0usize; 3];
+
+            if let (Some(setpoint), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
+                for axis in 0..2 {
+                    // Roll and pitch
+                    let len = setpoint[axis]
+                        .len()
+                        .min(gyro[axis].len())
+                        .min(throttle_values.len());
+                    for i in 0..len {
+                        let error = (setpoint[axis][i] - gyro[axis][i]).abs();
+                        let throttle = throttle_values[i];
+
+                        throttle_sum += throttle;
+                        error_sum += error;
+                        throttle_error_sum += throttle * error;
+                        throttle_sq_sum += throttle * throttle;
+                        error_sq_sum += error * error;
+                        count += 1;
+
+                        // Accumulate error by throttle band
+                        let band = if throttle < 30.0 {
+                            0
+                        } else if throttle < 70.0 {
+                            1
+                        } else {
+                            2
+                        };
+                        band_error_sum[band] += error;
+                        band_count[band] += 1;
+                    }
+                }
+            }
+
+            // Calculate Pearson correlation coefficient
+            if count > 10 {
+                let n = count as f32;
+                let numerator = n * throttle_error_sum - throttle_sum * error_sum;
+                let denom_throttle = (n * throttle_sq_sum - throttle_sum * throttle_sum).sqrt();
+                let denom_error = (n * error_sq_sum - error_sum * error_sum).sqrt();
+                let denom = denom_throttle * denom_error;
+
+                if denom > 1e-10 {
+                    result.throttle_error_correlation = (numerator / denom).abs();
+                }
+
+                // Calculate motor response by throttle band
+                for band in 0..3 {
+                    if band_count[band] > 0 {
+                        result.motor_response_by_throttle[band] =
+                            band_error_sum[band] / band_count[band] as f32;
+                    }
+                }
+
+                // Calculate non-linearity score based on how error varies with throttle
+                // Higher score = more non-linear (bigger difference between bands)
+                let low_mid_diff = (result.motor_response_by_throttle[1]
+                    - result.motor_response_by_throttle[0])
+                    .abs();
+                let mid_high_diff = (result.motor_response_by_throttle[2]
+                    - result.motor_response_by_throttle[1])
+                    .abs();
+                result.motor_nonlinearity_score = (low_mid_diff + mid_high_diff) / 2.0;
+
+                // Suggest thrust linearization value based on non-linearity
+                // Betaflight default range is 0-150, with 0 being no correction
+                if result.motor_nonlinearity_score > 5.0 {
+                    // Calculate suggested value based on non-linearity pattern
+                    // Higher low-throttle error relative to high = positive correction
+                    let low_high_ratio = if result.motor_response_by_throttle[2] > 0.1 {
+                        result.motor_response_by_throttle[0] / result.motor_response_by_throttle[2]
+                    } else {
+                        1.0
+                    };
+
+                    if low_high_ratio > 1.2 {
+                        // Low throttle has more error - motors "slow to spin up"
+                        result.suggested_thrust_linear =
+                            ((low_high_ratio - 1.0) * 50.0).clamp(0.0, 50.0);
+                    } else if low_high_ratio < 0.8 {
+                        // High throttle has more error - motors saturating or non-linear at top
+                        // For brushless, this is typically addressed by other means
+                        result.suggested_thrust_linear = 0.0;
+                    }
+                }
+            }
         }
+
+        result
     }
 }
 
@@ -1170,7 +1496,50 @@ impl SuggestionsTab {
             });
         }
 
-        // === FEEDFORWARD ANALYSIS ===
+        // === FEEDFORWARD ANALYSIS (Enhanced with anticipation metrics) ===
+        // Use new anticipation score for better FF recommendations
+
+        // Poor anticipation - gyro lagging behind setpoint
+        if analysis.ff_anticipation_score < 50.0 && analysis.ff_transition_count > 10 {
+            let delay_text = if analysis.ff_response_delay_ms > 2.0 {
+                format!(
+                    "Gyro lags by {:.1}ms on average.",
+                    analysis.ff_response_delay_ms
+                )
+            } else {
+                format!(
+                    "Gyro responds with {:.1}ms delay.",
+                    analysis.ff_response_delay_ms
+                )
+            };
+
+            let boost_text = if analysis.suggested_ff_boost > 0.0 {
+                format!("Suggest FF boost of +{:.0}", analysis.suggested_ff_boost)
+            } else {
+                "FF tuning needed".to_string()
+            };
+
+            suggestions.push(TuningSuggestion {
+                category: "Feedforward".to_string(),
+                title: format!("Poor FF Anticipation (Score: {:.0}/100)", analysis.ff_anticipation_score),
+                description: format!(
+                    "Analyzed {} stick transitions. {} Only {:.0}% had good gyro response timing.",
+                    analysis.ff_transition_count, delay_text, analysis.ff_anticipation_score
+                ),
+                recommendation: format!(
+                    "{}. 1) Increase FF boost in Betaflight Configurator. 2) Check FF transition value.",
+                    boost_text
+                ),
+                cli_command: if analysis.suggested_ff_boost >= 10.0 {
+                    Some(format!("set feedforward_boost = {}", (analysis.suggested_ff_boost.min(30.0)) as i32))
+                } else {
+                    None
+                },
+                severity: if analysis.ff_anticipation_score < 30.0 { Severity::Warning } else { Severity::Info },
+            });
+        }
+
+        // Legacy effectiveness check for fast stick rates
         if analysis.ff_effectiveness < 50.0 && analysis.max_stick_rate.iter().any(|&r| r > 500.0) {
             let (severity, severity_text) = if analysis.ff_effectiveness < 30.0 {
                 (Severity::Warning, "POOR")
@@ -1192,6 +1561,21 @@ impl SuggestionsTab {
             });
         }
 
+        // Good anticipation but could be reduced (over-anticipating)
+        if analysis.ff_anticipation_score > 85.0 && analysis.ff_response_delay_ms < -1.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Feedforward".to_string(),
+                title: "FF may be over-anticipating".to_string(),
+                description: format!(
+                    "Excellent anticipation score ({:.0}%) but gyro responds {:.1}ms BEFORE setpoint. May cause overshoot.",
+                    analysis.ff_anticipation_score, analysis.ff_response_delay_ms.abs()
+                ),
+                recommendation: "Consider reducing feedforward boost if experiencing overshoot on fast inputs.".to_string(),
+                cli_command: None,
+                severity: Severity::Info,
+            });
+        }
+
         if analysis.setpoint_jitter > 10.0 {
             suggestions.push(TuningSuggestion {
                 category: "RC Link / Feedforward".to_string(),
@@ -1201,7 +1585,7 @@ impl SuggestionsTab {
                     analysis.setpoint_jitter
                 ),
                 recommendation: "High RC jitter causes hot motors and noise. 1) Increase RC Smoothing values. 2) Check radio link quality.".to_string(),
-                cli_command: Some("set rc_smoothing_auto_factor = 40\nset rc_smoothing_setpoint_rate = 0".to_string()),
+                cli_command: Some("set rc_smoothing_auto_factor = 40\\nset rc_smoothing_setpoint_rate = 0".to_string()),
                 severity: Severity::Warning,
             });
         }
@@ -1783,32 +2167,99 @@ impl SuggestionsTab {
             });
         }
 
-        // === TPA ANALYSIS ===
+        // === TPA ANALYSIS (Enhanced with Betaflight-style metrics) ===
         let tpa_mode = headers.get("tpa_mode").map(|s| s.as_str()).unwrap_or("1");
         let tpa_rate = get_val(&["tpa_rate"]).unwrap_or(65.0);
         let tpa_breakpoint = get_val(&["tpa_breakpoint"]).unwrap_or(1350.0);
         let tpa_low_rate = get_val(&["tpa_low_rate"]).unwrap_or(20.0);
-        let tpa_low_breakpoint = get_val(&["tpa_low_breakpoint"]).unwrap_or(1050.0);
+        let _tpa_low_breakpoint = get_val(&["tpa_low_breakpoint"]).unwrap_or(1050.0);
 
-        // High-throttle tracking issues - TPA may be too aggressive
+        // Use new throttle-segmented D-term noise analysis
+        let noise_ratio = analysis.high_throttle_noise_ratio;
+        let error_ratio = analysis.high_throttle_error_ratio;
+
+        // Calculate error values for use in later thrust linearization check
         let high_throttle_error = (analysis.tracking_error_by_throttle[0][2]
             + analysis.tracking_error_by_throttle[1][2])
             / 2.0;
+        let low_throttle_error = (analysis.tracking_error_by_throttle[0][0]
+            + analysis.tracking_error_by_throttle[1][0])
+            / 2.0;
 
-        if high_throttle_error > 18.0 && tpa_rate > 60.0 {
+        // D-term noise increases significantly at high throttle - need more TPA
+        if noise_ratio > 2.0 && tpa_rate < analysis.suggested_tpa_rate {
+            let mode_name = if analysis.suggested_tpa_mode == 1 {
+                "PD"
+            } else {
+                "D"
+            };
+            suggestions.push(TuningSuggestion {
+                category: "TPA".to_string(),
+                title: "Increase TPA for high-throttle noise control".to_string(),
+                description: format!(
+                    "D-term noise at high throttle is {:.1}x higher than at low throttle. \
+                     Current TPA rate = {:.0}%. Noise: low={:.1}, mid={:.1}, high={:.1}.",
+                    noise_ratio, tpa_rate,
+                    analysis.dterm_noise_by_throttle[0],
+                    analysis.dterm_noise_by_throttle[1],
+                    analysis.dterm_noise_by_throttle[2]
+                ),
+                recommendation: format!(
+                    "Increase TPA to {:.0}% (mode {}) starting at {:.0}µs to reduce motor heat and oscillations.",
+                    analysis.suggested_tpa_rate, mode_name, analysis.suggested_tpa_breakpoint
+                ),
+                cli_command: Some(format!(
+                    "set tpa_mode = {}\\nset tpa_rate = {}\\nset tpa_breakpoint = {}",
+                    if analysis.suggested_tpa_mode == 1 { "PD" } else { "D" },
+                    analysis.suggested_tpa_rate as i32,
+                    analysis.suggested_tpa_breakpoint as i32
+                )),
+                severity: if noise_ratio > 3.0 { Severity::Warning } else { Severity::Info },
+            });
+        }
+
+        // TPA might be over-attenuating - tracking error high but noise is fine
+        if error_ratio > 1.5 && noise_ratio < 1.5 && tpa_rate > 50.0 {
             suggestions.push(TuningSuggestion {
                 category: "TPA".to_string(),
                 title: "TPA may be too aggressive".to_string(),
                 description: format!(
-                    "High-throttle tracking error: {:.1}°/s. TPA rate = {:.0}% starting at {:.0}µs. PIDs may be cut too much.",
-                    high_throttle_error, tpa_rate, tpa_breakpoint
+                    "High-throttle tracking error is {:.1}x worse than low throttle, but D-term noise only {:.1}x higher. \
+                     TPA rate = {:.0}% may be cutting PIDs too much.",
+                    error_ratio, noise_ratio, tpa_rate
                 ),
-                recommendation: "Lower TPA rate or raise breakpoint for better high-throttle control.".to_string(),
+                recommendation: format!(
+                    "Reduce TPA rate to {:.0}% or raise breakpoint for better high-throttle response.",
+                    analysis.suggested_tpa_rate
+                ),
                 cli_command: Some(format!(
-                    "set tpa_rate = {}\nset tpa_breakpoint = {}",
-                    (tpa_rate * 0.75) as i32, (tpa_breakpoint + 100.0).min(1500.0) as i32
+                    "set tpa_rate = {}\\nset tpa_breakpoint = {}",
+                    analysis.suggested_tpa_rate as i32,
+                    (tpa_breakpoint + 100.0).min(1500.0) as i32
                 )),
                 severity: Severity::Warning,
+            });
+        }
+
+        // D-term noise is relatively flat - can reduce TPA
+        if noise_ratio < 1.3 && tpa_rate > 50.0 {
+            suggestions.push(TuningSuggestion {
+                category: "TPA".to_string(),
+                title: "TPA could be reduced".to_string(),
+                description: format!(
+                    "D-term noise is consistent across throttle (ratio {:.2}x). \
+                     Current TPA rate = {:.0}% may be unnecessary.",
+                    noise_ratio, tpa_rate
+                ),
+                recommendation:
+                    "Lower TPA rate for sharper high-throttle response without noise penalty."
+                        .to_string(),
+                cli_command: Some(format!(
+                    "set tpa_rate = {}\\nset tpa_breakpoint = {}",
+                    analysis.suggested_tpa_rate.max(30.0) as i32,
+                    analysis.suggested_tpa_breakpoint as i32
+                )),
+                severity: Severity::Info,
             });
         }
 
@@ -1824,7 +2275,7 @@ impl SuggestionsTab {
                     analysis.gyro_noise_low_throttle, analysis.gyro_noise_mid_throttle
                 ),
                 recommendation: "Enable TPA Low to reduce gains at low throttle.".to_string(),
-                cli_command: Some("set tpa_low_rate = 20\nset tpa_low_breakpoint = 1050".to_string()),
+                cli_command: Some("set tpa_low_rate = 20\\nset tpa_low_breakpoint = 1050".to_string()),
                 severity: Severity::Info,
             });
         }
@@ -1983,20 +2434,46 @@ impl SuggestionsTab {
             });
         }
 
-        // === THRUST LINEARIZATION ===
+        // === THRUST LINEARIZATION (Enhanced with motor curve analysis) ===
         let thrust_linear = get_val(&["thrust_linear", "thrustLinearization"]).unwrap_or(0.0);
 
-        // Detect non-linear throttle response (poor tracking at varying throttle)
+        // Use new motor non-linearity analysis
+        if analysis.motor_nonlinearity_score > 5.0
+            && thrust_linear < analysis.suggested_thrust_linear
+        {
+            suggestions.push(TuningSuggestion {
+                category: "Motor Linearization".to_string(),
+                title: format!("Motor response non-linearity detected (score: {:.1})", analysis.motor_nonlinearity_score),
+                description: format!(
+                    "Error by throttle: low={:.1}°/s, mid={:.1}°/s, high={:.1}°/s. Correlation with throttle: {:.0}%.",
+                    analysis.motor_response_by_throttle[0],
+                    analysis.motor_response_by_throttle[1],
+                    analysis.motor_response_by_throttle[2],
+                    analysis.throttle_error_correlation * 100.0
+                ),
+                recommendation: format!(
+                    "Thrust linearization of {} compensates for motor non-linearity. Best for brushless with aggressive props.",
+                    analysis.suggested_thrust_linear as i32
+                ),
+                cli_command: Some(format!("set thrust_linear = {}", analysis.suggested_thrust_linear as i32)),
+                severity: if analysis.motor_nonlinearity_score > 10.0 { Severity::Warning } else { Severity::Info },
+            });
+        }
+
+        // Legacy check for basic throttle tracking variance
         let throttle_tracking_variance = (high_throttle_error - low_throttle_error).abs();
-        if throttle_tracking_variance > 10.0 && thrust_linear < 20.0 {
+        if throttle_tracking_variance > 15.0
+            && thrust_linear < 10.0
+            && analysis.motor_nonlinearity_score <= 5.0
+        {
             suggestions.push(TuningSuggestion {
                 category: "Motor Linearization".to_string(),
                 title: "Consider thrust linearization".to_string(),
                 description: format!(
-                    "Tracking error varies by {:.1}°/s across throttle range. Thrust linearization compensates for motor non-linearity.",
+                    "Tracking error varies by {:.1}°/s across throttle. May indicate motor non-linearity.",
                     throttle_tracking_variance
                 ),
-                recommendation: "For whoops or brushless with non-linear motors, add thrust linearization.".to_string(),
+                recommendation: "Try thrust linearization starting at 20 for whoops/brushless.".to_string(),
                 cli_command: Some("set thrust_linear = 20".to_string()),
                 severity: Severity::Info,
             });
@@ -2633,7 +3110,10 @@ impl SuggestionsTab {
 
                         ui.add_space(8.0);
                         ui.horizontal(|ui| {
-                            if ui.button(format!("{} Copy Response", icons::CLIPBOARD)).clicked() {
+                            if ui
+                                .button(format!("{} Copy Response", icons::CLIPBOARD))
+                                .clicked()
+                            {
                                 ui.output_mut(|o| o.copied_text = response.clone());
                                 analytics::log_ai_response_copied();
                             }
@@ -2859,7 +3339,10 @@ impl SuggestionsTab {
                                                 egui::Layout::right_to_left(egui::Align::Center),
                                                 |ui| {
                                                     if ui
-                                                        .button(format!("{} Copy", icons::CLIPBOARD))
+                                                        .button(format!(
+                                                            "{} Copy",
+                                                            icons::CLIPBOARD
+                                                        ))
                                                         .on_hover_text("Copy to clipboard")
                                                         .clicked()
                                                     {
