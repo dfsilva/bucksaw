@@ -95,10 +95,11 @@ impl App {
             egui_phosphor::Variant::Regular.font_data(),
         );
 
-        // Insert Phosphor font at the beginning of the Proportional family
-        // so it takes precedence for icon glyphs (PUA characters)
+        // Append Phosphor font to the Proportional family as a fallback
+        // This ensures regular text uses default fonts, but icon glyphs (PUA characters)
+        // will fall back to Phosphor when not found in the primary fonts
         if let Some(font_keys) = fonts.families.get_mut(&egui::FontFamily::Proportional) {
-            font_keys.insert(0, "phosphor".into());
+            font_keys.push("phosphor".into());
         }
 
         cc.egui_ctx.set_fonts(fonts);

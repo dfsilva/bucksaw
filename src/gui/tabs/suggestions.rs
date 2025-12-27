@@ -156,6 +156,34 @@ struct AnalysisResults {
     suggested_thrust_linear: f32,
     /// Motor response at different throttle bands [low, mid, high]
     motor_response_by_throttle: [f32; 3],
+
+    // === Antigravity Analysis (Betaflight-style) ===
+    // Simulates Betaflight's antigravity algorithm and analyzes effectiveness
+    // Algorithm: throttle derivative weighted by (1-throttle)², PT2 filtered, then I-term boost
+    /// Number of detected antigravity activation events (rapid throttle changes)
+    antigravity_event_count: usize,
+    /// Total duration (seconds) where antigravity would be active
+    antigravity_active_duration: f32,
+    /// Percentage of flight where antigravity was active
+    antigravity_active_pct: f32,
+    /// Average simulated I-term boost factor during antigravity events
+    avg_iterm_boost: f32,
+    /// Peak simulated I-term boost factor
+    peak_iterm_boost: f32,
+    /// Average tracking error (Roll+Pitch) during antigravity events
+    error_during_antigravity: f32,
+    /// Average tracking error when antigravity NOT active
+    error_without_antigravity: f32,
+    /// Ratio: error_during / error_without (>1.0 = AG events still have issues, <1.0 = AG working)
+    antigravity_error_ratio: f32,
+    /// Correlation coefficient between throttle derivative and pitch error spikes (-1 to 1)
+    throttle_to_pitch_correlation: f32,
+    /// Calculated optimal antigravity gain based on analysis (50-200 typical)
+    suggested_antigravity_gain: f32,
+    /// Suggested action: -1 = decrease, 0 = keep, 1 = increase
+    antigravity_recommendation: i8,
+    /// Confidence score for the suggestion (0-100)
+    antigravity_suggestion_confidence: f32,
 }
 
 impl AnalysisResults {
@@ -1022,6 +1050,19 @@ impl AnalysisResults {
             throttle_error_correlation: 0.0,
             suggested_thrust_linear: 0.0,
             motor_response_by_throttle: [0.0; 3],
+            // Antigravity analysis (computed below)
+            antigravity_event_count: 0,
+            antigravity_active_duration: 0.0,
+            antigravity_active_pct: 0.0,
+            avg_iterm_boost: 0.0,
+            peak_iterm_boost: 0.0,
+            error_during_antigravity: 0.0,
+            error_without_antigravity: 0.0,
+            antigravity_error_ratio: 1.0,
+            throttle_to_pitch_correlation: 0.0,
+            suggested_antigravity_gain: 80.0, // Betaflight default
+            antigravity_recommendation: 0,    // 0 = keep
+            antigravity_suggestion_confidence: 0.0,
         };
 
         // === THRUST LINEARIZATION ANALYSIS ===
@@ -1121,6 +1162,209 @@ impl AnalysisResults {
                         // For brushless, this is typically addressed by other means
                         result.suggested_thrust_linear = 0.0;
                     }
+                }
+            }
+        }
+
+        // === ANTIGRAVITY ANALYSIS (Betaflight-style) ===
+        // Simulates Betaflight's antigravity algorithm to analyze effectiveness
+        // Key insight: Antigravity boosts I-term during rapid throttle changes
+        // We detect these events and compare tracking error during vs. outside events
+        if throttle_values.len() > 100 {
+            let dt = 1.0 / sample_rate as f32;
+            let pid_frequency = sample_rate as f32;
+
+            // Step 1: Calculate throttle derivative (Betaflight-style)
+            // Betaflight: |throttle - previousThrottle| * pidFrequency
+            let mut throttle_derivatives: Vec<f32> = Vec::with_capacity(throttle_values.len());
+            throttle_derivatives.push(0.0);
+            for i in 1..throttle_values.len() {
+                // Normalize throttle to 0-1 range (from percentage)
+                let throttle_now = throttle_values[i] / 100.0;
+                let throttle_prev = throttle_values[i - 1] / 100.0;
+                let throttle_inv = 1.0 - throttle_now;
+
+                // Calculate derivative and apply Betaflight's weighting
+                let mut derivative = (throttle_now - throttle_prev).abs() * pid_frequency;
+
+                // Weight by (1-throttle)² to focus on low throttle regime
+                derivative *= throttle_inv * throttle_inv;
+
+                // When increasing throttle, further weight by (1-throttle) * 0.5
+                if throttle_now > throttle_prev {
+                    derivative *= throttle_inv * 0.5;
+                }
+
+                throttle_derivatives.push(derivative);
+            }
+
+            // Step 2: Apply PT2 low-pass filter (simulating anti_gravity_cutoff_hz = 5Hz)
+            // PT2 filter: simplified as exponential moving average for approximation
+            let cutoff_hz = 5.0_f32;
+            let alpha = (2.0 * std::f32::consts::PI * cutoff_hz * dt)
+                / (2.0 * std::f32::consts::PI * cutoff_hz * dt + 2.0);
+            let mut filtered_derivative: Vec<f32> = Vec::with_capacity(throttle_derivatives.len());
+            let mut filter_state_1 = 0.0_f32;
+            let mut filter_state_2 = 0.0_f32;
+
+            for &deriv in &throttle_derivatives {
+                // Two-stage PT1 approximation of PT2
+                filter_state_1 += alpha * (deriv - filter_state_1);
+                filter_state_2 += alpha * (filter_state_1 - filter_state_2);
+                filtered_derivative.push(filter_state_2);
+            }
+
+            // Step 3: Calculate simulated I-term boost (antiGravityThrottleD * antiGravityGain / 1000)
+            // Using default gain of 80 (Betaflight 4.x default)
+            let assumed_ag_gain = 80.0_f32;
+            let boost_factors: Vec<f32> = filtered_derivative
+                .iter()
+                .map(|d| d * assumed_ag_gain / 1000.0)
+                .collect();
+
+            // Step 4: Detect antigravity events (where boost factor exceeds threshold)
+            // Betaflight shows AG active when itermAccelerator > antiGravityOsdCutoff
+            let ag_activation_threshold = 0.05_f32; // Typical threshold value
+            let mut event_count = 0usize;
+            let mut active_samples = 0usize;
+            let mut total_boost_during_events = 0.0_f32;
+            let mut peak_boost = 0.0_f32;
+            let mut in_event = false;
+
+            for &boost in &boost_factors {
+                if boost > ag_activation_threshold {
+                    if !in_event {
+                        event_count += 1;
+                        in_event = true;
+                    }
+                    active_samples += 1;
+                    total_boost_during_events += boost;
+                    if boost > peak_boost {
+                        peak_boost = boost;
+                    }
+                } else {
+                    in_event = false;
+                }
+            }
+
+            result.antigravity_event_count = event_count;
+            result.antigravity_active_duration = active_samples as f32 * dt;
+            result.antigravity_active_pct =
+                (active_samples as f32 / throttle_values.len() as f32) * 100.0;
+            result.avg_iterm_boost = if active_samples > 0 {
+                total_boost_during_events / active_samples as f32
+            } else {
+                0.0
+            };
+            result.peak_iterm_boost = peak_boost;
+
+            // Step 5: Correlate AG events with tracking error
+            // Compare error during AG events vs. outside AG events
+            if let (Some(setpoint), Some(gyro)) = (fd.setpoint(), fd.gyro_filtered()) {
+                let mut error_during_ag = 0.0_f32;
+                let mut error_outside_ag = 0.0_f32;
+                let mut count_during = 0usize;
+                let mut count_outside = 0usize;
+
+                // For pitch axis specifically (most affected by AG)
+                let axis = 1; // Pitch
+                let len = setpoint[axis]
+                    .len()
+                    .min(gyro[axis].len())
+                    .min(boost_factors.len());
+
+                for i in 0..len {
+                    let error = (setpoint[axis][i] - gyro[axis][i]).abs();
+                    if boost_factors[i] > ag_activation_threshold {
+                        error_during_ag += error;
+                        count_during += 1;
+                    } else {
+                        error_outside_ag += error;
+                        count_outside += 1;
+                    }
+                }
+
+                // Calculate average errors
+                if count_during > 10 {
+                    result.error_during_antigravity = error_during_ag / count_during as f32;
+                }
+                if count_outside > 10 {
+                    result.error_without_antigravity = error_outside_ag / count_outside as f32;
+                }
+
+                // Calculate ratio (>1 means AG events still have more error)
+                if result.error_without_antigravity > 0.1 {
+                    result.antigravity_error_ratio =
+                        result.error_during_antigravity / result.error_without_antigravity;
+                }
+
+                // Step 6: Calculate throttle-to-pitch-error correlation
+                // Higher correlation => throttle changes directly cause pitch errors
+                let mut thr_sum = 0.0_f32;
+                let mut err_sum = 0.0_f32;
+                let mut thr_err_sum = 0.0_f32;
+                let mut thr_sq_sum = 0.0_f32;
+                let mut err_sq_sum = 0.0_f32;
+                let len_corr = throttle_derivatives
+                    .len()
+                    .min(setpoint[1].len())
+                    .min(gyro[1].len());
+
+                for i in 0..len_corr {
+                    let thr_d = throttle_derivatives[i];
+                    let err = (setpoint[1][i] - gyro[1][i]).abs();
+                    thr_sum += thr_d;
+                    err_sum += err;
+                    thr_err_sum += thr_d * err;
+                    thr_sq_sum += thr_d * thr_d;
+                    err_sq_sum += err * err;
+                }
+
+                if len_corr > 100 {
+                    let n = len_corr as f32;
+                    let numerator = n * thr_err_sum - thr_sum * err_sum;
+                    let denom = ((n * thr_sq_sum - thr_sum * thr_sum).max(0.0).sqrt())
+                        * ((n * err_sq_sum - err_sum * err_sum).max(0.0).sqrt());
+                    if denom > 1e-10 {
+                        result.throttle_to_pitch_correlation = (numerator / denom).clamp(-1.0, 1.0);
+                    }
+                }
+
+                // Step 7: Generate recommendation based on analysis
+                // HIGH correlation + LOW AG effectiveness = INCREASE AG gain
+                // LOW correlation OR HIGH AG effectiveness = DECREASE AG gain
+                let correlation_strength = result.throttle_to_pitch_correlation.abs();
+                let error_ratio = result.antigravity_error_ratio;
+
+                if correlation_strength > 0.3 && error_ratio > 1.2 {
+                    // Throttle changes cause errors AND AG isn't helping enough
+                    result.antigravity_recommendation = 1; // Increase
+                    result.suggested_antigravity_gain =
+                        (assumed_ag_gain * error_ratio).clamp(80.0, 150.0);
+                    result.antigravity_suggestion_confidence =
+                        (correlation_strength * 100.0).clamp(0.0, 100.0);
+                } else if error_ratio < 0.8 && event_count > 10 {
+                    // AG events have LESS error than normal (working well, or maybe over-boosting)
+                    if result.avg_iterm_boost > 0.2 {
+                        // High boost but very effective - might be over-correcting
+                        result.antigravity_recommendation = -1; // Decrease
+                        result.suggested_antigravity_gain =
+                            (assumed_ag_gain * 0.8).clamp(50.0, 100.0);
+                    } else {
+                        result.antigravity_recommendation = 0; // Keep
+                        result.suggested_antigravity_gain = assumed_ag_gain;
+                    }
+                    result.antigravity_suggestion_confidence = 70.0;
+                } else if correlation_strength < 0.1 {
+                    // Very low correlation = throttle changes don't cause errors
+                    result.antigravity_recommendation = 0; // Keep current
+                    result.suggested_antigravity_gain = assumed_ag_gain;
+                    result.antigravity_suggestion_confidence = 50.0;
+                } else {
+                    // Borderline case
+                    result.antigravity_recommendation = 0;
+                    result.suggested_antigravity_gain = assumed_ag_gain;
+                    result.antigravity_suggestion_confidence = 30.0;
                 }
             }
         }
@@ -2065,44 +2309,153 @@ impl SuggestionsTab {
             });
         }
 
-        // === ANTI-GRAVITY P-BOOST ANALYSIS ===
+        // === ANTI-GRAVITY ANALYSIS (Enhanced with Betaflight-style simulation) ===
         let anti_gravity_gain = get_val(&["anti_gravity_gain"]).unwrap_or(80.0);
         let anti_gravity_p_gain = get_val(&["anti_gravity_p_gain"]).unwrap_or(100.0);
         let anti_gravity_cutoff = get_val(&["anti_gravity_cutoff_hz"]).unwrap_or(5.0);
 
-        // Check if low-throttle tracking is poor (punch-outs/dive recovery)
+        // Primary recommendation based on comprehensive analysis
+        if analysis.antigravity_event_count > 5 && analysis.antigravity_suggestion_confidence > 40.0
+        {
+            match analysis.antigravity_recommendation {
+                1 => {
+                    // Recommendation: INCREASE
+                    let suggested_gain = analysis.suggested_antigravity_gain as i32;
+                    suggestions.push(TuningSuggestion {
+                        category: "Anti-Gravity".to_string(),
+                        title: "Increase Anti-Gravity gain for better throttle transitions".to_string(),
+                        description: format!(
+                            "Analysis detected {} throttle transition events with {:.1}% active time. \
+                            Error during AG events is {:.1}x higher than normal (ratio: {:.2}). \
+                            Throttle-to-pitch correlation: {:.2}. Current gain: {:.0}.",
+                            analysis.antigravity_event_count,
+                            analysis.antigravity_active_pct,
+                            analysis.antigravity_error_ratio,
+                            analysis.antigravity_error_ratio,
+                            analysis.throttle_to_pitch_correlation,
+                            anti_gravity_gain
+                        ),
+                        recommendation: format!(
+                            "Increase anti_gravity_gain to {} for stronger I-term boost during throttle changes. \
+                            This helps counter nose-down/up tendencies during punch-outs and dives. \
+                            Confidence: {:.0}%.",
+                            suggested_gain,
+                            analysis.antigravity_suggestion_confidence
+                        ),
+                        cli_command: Some(format!("set anti_gravity_gain = {}", suggested_gain)),
+                        severity: if analysis.antigravity_error_ratio > 1.5 {
+                            Severity::Warning
+                        } else {
+                            Severity::Info
+                        },
+                    });
+                }
+                -1 => {
+                    // Recommendation: DECREASE
+                    let suggested_gain = analysis.suggested_antigravity_gain as i32;
+                    suggestions.push(TuningSuggestion {
+                        category: "Anti-Gravity".to_string(),
+                        title: "Consider reducing Anti-Gravity gain".to_string(),
+                        description: format!(
+                            "Analysis shows AG events have {:.1}x LOWER error than normal flight (ratio: {:.2}). \
+                            Average I-term boost: {:.2}. Peak boost: {:.2}. This may indicate over-correction. \
+                            Current gain: {:.0}.",
+                            1.0 / analysis.antigravity_error_ratio.max(0.01),
+                            analysis.antigravity_error_ratio,
+                            analysis.avg_iterm_boost,
+                            analysis.peak_iterm_boost,
+                            anti_gravity_gain
+                        ),
+                        recommendation: format!(
+                            "Reducing anti_gravity_gain to {} may provide smoother throttle response \
+                            without over-boosting the I-term. The current settings appear to over-correct. \
+                            Confidence: {:.0}%.",
+                            suggested_gain,
+                            analysis.antigravity_suggestion_confidence
+                        ),
+                        cli_command: Some(format!("set anti_gravity_gain = {}", suggested_gain)),
+                        severity: Severity::Info,
+                    });
+                }
+                _ => {
+                    // Recommendation: KEEP (only show if user has non-default settings)
+                    if anti_gravity_gain != 80.0 && analysis.antigravity_event_count > 10 {
+                        suggestions.push(TuningSuggestion {
+                            category: "Anti-Gravity".to_string(),
+                            title: "Anti-Gravity settings appear optimal".to_string(),
+                            description: format!(
+                                "Analysis of {} throttle transitions shows error ratio of {:.2} (close to 1.0 is ideal). \
+                                Throttle-to-pitch correlation: {:.2}. Peak I-term boost: {:.2}. \
+                                Current gain: {:.0}.",
+                                analysis.antigravity_event_count,
+                                analysis.antigravity_error_ratio,
+                                analysis.throttle_to_pitch_correlation,
+                                analysis.peak_iterm_boost,
+                                anti_gravity_gain
+                            ),
+                            recommendation: "Current Anti-Gravity configuration is working effectively. No changes recommended.".to_string(),
+                            cli_command: None,
+                            severity: Severity::Info,
+                        });
+                    }
+                }
+            }
+        }
+
+        // Additional P-boost suggestion for aggressive flying with high throttle variance
         let low_throttle_error = (analysis.tracking_error_by_throttle[0][0]
             + analysis.tracking_error_by_throttle[1][0])
             / 2.0;
 
-        if low_throttle_error > 12.0 && analysis.throttle_variance > 15.0 {
-            if anti_gravity_p_gain < 120.0 {
-                suggestions.push(TuningSuggestion {
-                    category: "Anti-Gravity".to_string(),
-                    title: "Consider Anti-Gravity P-boost".to_string(),
-                    description: format!(
-                        "Low-throttle tracking error: {:.1}°/s with throttle variance {:.1}%. AG P-gain ({:.0}%) can help during transitions.",
-                        low_throttle_error, analysis.throttle_variance, anti_gravity_p_gain
-                    ),
-                    recommendation: "Increase anti_gravity_p_gain for better punch-out/dive tracking.".to_string(),
-                    cli_command: Some("set anti_gravity_p_gain = 120".to_string()),
-                    severity: Severity::Info,
-                });
-            }
+        if low_throttle_error > 15.0
+            && analysis.throttle_variance > 20.0
+            && anti_gravity_p_gain < 120.0
+        {
+            suggestions.push(TuningSuggestion {
+                category: "Anti-Gravity".to_string(),
+                title: "Enable Anti-Gravity P-boost for aggressive flying".to_string(),
+                description: format!(
+                    "Low-throttle tracking error: {:.1}°/s with high throttle variance ({:.1}%). \
+                    P-boost (anti_gravity_p_gain) helps maintain attitude during rapid throttle changes. \
+                    Current P-gain: {:.0}.",
+                    low_throttle_error, analysis.throttle_variance, anti_gravity_p_gain
+                ),
+                recommendation: "Increase anti_gravity_p_gain to 120 for additional P-term boost during throttle transitions.".to_string(),
+                cli_command: Some("set anti_gravity_p_gain = 120".to_string()),
+                severity: Severity::Info,
+            });
+        }
 
-            if anti_gravity_gain < 100.0 {
-                suggestions.push(TuningSuggestion {
-                    category: "Anti-Gravity".to_string(),
-                    title: "Increase Anti-Gravity I-term boost".to_string(),
-                    description: format!(
-                        "Anti-Gravity gain = {:.0}. With significant throttle changes, higher AG helps I-term during transitions.",
-                        anti_gravity_gain
-                    ),
-                    recommendation: "Raise Anti-Gravity gain for aggressive throttle flying.".to_string(),
-                    cli_command: Some("set anti_gravity_gain = 100".to_string()),
-                    severity: Severity::Info,
-                });
-            }
+        // Cutoff adjustment suggestion based on event duration
+        if analysis.antigravity_active_pct > 15.0 && anti_gravity_cutoff < 8.0 {
+            suggestions.push(TuningSuggestion {
+                category: "Anti-Gravity".to_string(),
+                title: "Consider higher Anti-Gravity cutoff for faster response".to_string(),
+                description: format!(
+                    "Anti-Gravity is active {:.1}% of flight time. Current cutoff: {:.0}Hz. \
+                    Higher cutoff provides snappier AG activation but shorter duration.",
+                    analysis.antigravity_active_pct, anti_gravity_cutoff
+                ),
+                recommendation: "Increase anti_gravity_cutoff_hz to 8 for faster AG response (less lingering boost).".to_string(),
+                cli_command: Some("set anti_gravity_cutoff_hz = 8".to_string()),
+                severity: Severity::Info,
+            });
+        } else if analysis.antigravity_active_pct < 3.0
+            && analysis.throttle_variance > 15.0
+            && anti_gravity_cutoff > 4.0
+        {
+            suggestions.push(TuningSuggestion {
+                category: "Anti-Gravity".to_string(),
+                title: "Consider lower Anti-Gravity cutoff for longer boost".to_string(),
+                description: format!(
+                    "Anti-Gravity is only active {:.1}% of flight despite throttle variance of {:.1}%. \
+                    Current cutoff: {:.0}Hz. Lower cutoff provides longer AG duration.",
+                    analysis.antigravity_active_pct, analysis.throttle_variance, anti_gravity_cutoff
+                ),
+                recommendation: "Decrease anti_gravity_cutoff_hz to 4 for longer AG boost duration.".to_string(),
+                cli_command: Some("set anti_gravity_cutoff_hz = 4".to_string()),
+                severity: Severity::Info,
+            });
         }
 
         // === I-TERM RELAX OPTIMIZATION ===
